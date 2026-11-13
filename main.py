@@ -381,47 +381,38 @@ class VoidClient:
         top.pack(fill="x", padx=20, pady=(18, 12))
         tk.Label(top, text="Saved", bg=BG, fg="white",
                  font=("Segoe UI", 16, "bold")).pack(side="left")
-        count = len(self.scripts)
-        tk.Label(top, text=f"{count} saved", bg=BG, fg="#9b9b9b",
-                 font=("Segoe UI", 10)).pack(side="right")
+        Button(top, "Import", self.load).pack(side="right")
+        panel = tk.Canvas(self.library, bg="#111111", highlightthickness=1,
+                          highlightbackground="#292929")
+        panel.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        rows = tk.Frame(panel, bg="#111111")
+        anchor = panel.create_window(0, 0, anchor="nw", window=rows)
+        panel.bind("<Configure>", lambda event: panel.itemconfigure(anchor, width=event.width - 2))
+        rows.bind("<Configure>", lambda _: panel.configure(scrollregion=panel.bbox(anchor)))
 
-        actions = tk.Frame(self.library, bg=BG)
-        actions.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
-        Button(actions, "Import", self.load).pack(side="left", padx=5)
+        def scroll(event):
+            panel.yview_scroll(-int(event.delta / 120), "units")
 
-        list_panel = tk.Frame(self.library, bg="#191919", highlightthickness=1,
-                              highlightbackground="#303030")
-        list_panel.pack(fill="both", expand=True, padx=20, pady=(0, 8))
-        scrollbar = tk.Scrollbar(list_panel, orient="vertical", relief="flat")
-        self.library_list = tk.Listbox(
-            list_panel, bg="#191919", fg="#e8e8e8", selectbackground="#303030",
-            selectforeground="white", font=("Segoe UI", 11), activestyle="none",
-            highlightthickness=0, relief="flat", borderwidth=0,
-            exportselection=False, yscrollcommand=scrollbar.set,
-        )
-        self.library_list.pack(side="left", fill="both", expand=True, padx=8, pady=8)
-        scrollbar.configure(command=self.library_list.yview)
-        names = sorted(self.scripts, key=lambda name: (not self.scripts[name]["favorite"], name.casefold()))
-        for name in names:
-            prefix = "★" if self.scripts[name]["favorite"] else "☆"
-            self.library_list.insert("end", f"  {prefix}   {name}")
-
-        def selected_action(action):
-            selection = self.library_list.curselection()
-            if selection:
-                action(names[selection[0]])
-
-        if names:
-            if len(names) > 10:
-                scrollbar.pack(side="right", fill="y", pady=4)
-            self.library_list.selection_set(0)
-            self.library_list.bind("<Double-Button-1>", lambda _: selected_action(self.open_script))
-            self.library_list.bind("<Return>", lambda _: selected_action(self.open_script))
-            Button(actions, "Toggle Star", lambda: selected_action(self.favorite)).pack(side="right")
-            Button(actions, "Open", lambda: selected_action(self.open_script), primary=True).pack(side="right", padx=5)
-        else:
-            self.library_list.insert("end", "  Save a script from the editor to add it here.")
-            self.library_list.configure(state="disabled")
+        panel.bind("<MouseWheel>", scroll)
+        rows.bind("<MouseWheel>", scroll)
+        if not self.scripts:
+            tk.Label(rows, text="Save a script from the editor or import one from GitHub.",
+                     bg="#111111", fg="#aaa", font=("Segoe UI", 10)).pack(anchor="w", padx=14, pady=18)
+        for name in sorted(self.scripts, key=lambda name: (not self.scripts[name]["favorite"], name.casefold())):
+            row = tk.Frame(rows, bg="#1b1b1b")
+            row.pack(fill="x", padx=8, pady=(6, 0))
+            title = tk.Label(row, text=name, bg="#1b1b1b", fg="#eee", anchor="w",
+                             font=("Segoe UI Semibold", 10))
+            title.pack(side="left", fill="x", expand=True, padx=12)
+            title.bind("<Double-Button-1>", lambda _, name=name: self.open_script(name))
+            opened = Button(row, "Open", lambda name=name: self.open_script(name))
+            opened.pack(side="right", padx=(4, 6), pady=4)
+            star = Button(row, "★" if self.scripts[name]["favorite"] else "☆",
+                          lambda name=name: self.favorite(name))
+            star.configure(width=38)
+            star.pack(side="right", pady=4)
+            for widget in (row, title, opened, star):
+                widget.bind("<MouseWheel>", scroll)
 
     def persist(self, scripts):
         temporary = STORE.with_suffix(".tmp")
