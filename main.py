@@ -35,6 +35,19 @@ def ipinfo_lookup(address, token):
     ))
 
 
+def routing_lookup(address):
+    query = urlencode({"resource": str(address)})
+    url = f"https://stat.ripe.net/data/network-info/data.json?{query}"
+    with build_opener(NoRedirect()).open(url, timeout=8) as response:
+        payload = json.loads(response.read(65536))
+    if payload.get("status") != "ok":
+        raise ValueError("RIPEstat lookup failed.")
+    data = payload["data"]
+    networks = ", ".join(f"AS{asn}" for asn in data.get("asns", []))
+    return "\n".join((f"IP: {address}", f"Prefix: {data.get('prefix') or 'Unavailable'}",
+                      f"Announcing ASNs: {networks or 'Unavailable'}", "Data by RIPEstat"))
+
+
 def domain_lookup(domain, token):
     opener = build_opener(NoRedirect())
     sections = []
@@ -376,7 +389,8 @@ class VoidClient:
             if not address.is_global or address.is_multicast or "%" in value:
                 self.lookup_result.configure(text="Enter a public unicast IP address.")
             elif not token:
-                self.lookup_result.configure(text="Set VOIDCLIENT_IPINFO_TOKEN to enable IPinfo lookups.")
+                self.lookup_result.configure(text="Looking up IP address…")
+                self.start_lookup(value, lambda: routing_lookup(address), "RIPEstat lookup failed.")
             else:
                 self.lookup_result.configure(text="Looking up IP address…")
                 self.start_lookup(value, lambda: ipinfo_lookup(address, token), "IPinfo lookup failed. Check your token and connection.")
@@ -407,7 +421,7 @@ class VoidClient:
         def worker():
             try:
                 results.put(action())
-            except (OSError, ValueError, AttributeError):
+            except (OSError, ValueError, AttributeError, KeyError, TypeError):
                 results.put(failure)
 
         def show_result():
