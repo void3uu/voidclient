@@ -124,17 +124,28 @@ class VoidClient:
         self.library_tab = Button(nav, "☷", self.show_library)
         self.library_tab.pack(pady=(12, 0))
         tk.Frame(body, bg="#333333", width=1).pack(side="left", fill="y")
-        self.editor = tk.Frame(body, bg=BG)
-        self.library = tk.Frame(body, bg=BG)
+        self.views = tk.Frame(body, bg=BG)
+        self.views.pack(fill="both", expand=True)
+        self.view_motion = None
+        self.editor = tk.Frame(self.views, bg=BG)
+        self.library = tk.Frame(self.views, bg=BG)
+        tab_bar = tk.Frame(self.editor, bg="#1b1b1b", height=35)
+        tab_bar.pack(fill="x")
+        tab_bar.pack_propagate(False)
+        tab = tk.Frame(tab_bar, bg="#111111")
+        tab.pack(side="left", fill="y")
+        tk.Label(tab, text="Script", bg="#111111", fg="#dedede",
+                 font=("Segoe UI Semibold", 9)).pack(padx=18, pady=8)
         footer = tk.Frame(self.editor, bg=BG)
-        footer.pack(side="bottom", fill="x", padx=5, pady=5)
+        footer.pack(side="bottom", fill="x", padx=9, pady=7)
         Button(footer, "Run", self.run, primary=True).pack(side="left")
         Button(footer, "Import", self.load).pack(side="left", padx=5)
         Button(footer, "Save", self.save).pack(side="left")
-        self.lines = tk.Text(self.editor, width=5, bg=BG, fg="#77848f", bd=0,
+        tk.Frame(self.editor, bg="#292929", height=1).pack(side="bottom", fill="x")
+        self.lines = tk.Text(self.editor, width=5, bg="#111111", fg="#77848f", bd=0,
                              font=("Consolas", 10), padx=8, pady=10, state="disabled")
         self.lines.pack(side="left", fill="y")
-        self.text = tk.Text(self.editor, bg=BG, fg="#a5d2ff", insertbackground="white",
+        self.text = tk.Text(self.editor, bg="#111111", fg="#a5d2ff", insertbackground="white",
                             bd=0, font=("Consolas", 10), padx=10, pady=10, wrap="none",
                             undo=True, yscrollcommand=self.sync_lines)
         self.text.pack(fill="both", expand=True)
@@ -338,18 +349,32 @@ class VoidClient:
             self.root.after_cancel(self.refresh_job)
         self.refresh()
 
+    def reveal_view(self, view, previous):
+        if self.view_motion is not None:
+            self.root.after_cancel(self.view_motion)
+            self.view_motion = None
+        previous.place_forget()
+        if not self.window.winfo_ismapped():
+            view.place(relwidth=1, relheight=1)
+            return
+
+        def slide(step):
+            offset = round(14 * (1 - step / 7) ** 3)
+            view.place(x=offset, relwidth=1, width=-offset, relheight=1)
+            self.view_motion = self.root.after(16, slide, step + 1) if step < 7 else None
+
+        slide(0)
+
     def show_editor(self):
         self.editor_tab.state(active=True)
         self.library_tab.state(active=False)
-        self.library.pack_forget()
-        self.editor.pack(fill="both", expand=True)
+        self.reveal_view(self.editor, self.library)
         self.text.focus_set()
 
     def show_library(self):
         self.editor_tab.state(active=False)
         self.library_tab.state(active=True)
-        self.editor.pack_forget()
-        self.library.pack(fill="both", expand=True)
+        self.reveal_view(self.library, self.editor)
         for child in self.library.winfo_children():
             child.destroy()
         top = tk.Frame(self.library, bg=BG)
