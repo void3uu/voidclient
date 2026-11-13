@@ -6,8 +6,8 @@ from urllib.request import Request
 
 from urllib.request import urlopen
 
-# Increase this for each desktop release.
-BUILD = 2
+# Increase this for each desktop release. 
+BUILD = 1
 REPOSITORY = "void3uu/voidclient"
 
 
