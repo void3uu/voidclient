@@ -1,12 +1,12 @@
 import json
-from tkinter import ttk
 from queue import Empty, SimpleQueue
 from threading import Thread
 import re
 import tkinter as tk
 import winsound
-import webbrowser
-from updates import check_update
+import subprocess
+import sys
+from updates import check_update, install_update
 from pathlib import Path
 from tkinter import messagebox, simpledialog
 from urllib.parse import urlsplit
@@ -72,7 +72,7 @@ class VoidClient:
         root.geometry("793x491")
         root.overrideredirect(True)
         root.bind("<Map>", self.restore_chrome)
-        root.bind("<Alt-F4>", lambda _: root.destroy())
+        root.bind("<Alt-F4>", lambda _: self.close_app())
         root.minsize(570, 360)
         root.configure(bg="#0e0e10")
         self.icon = tk.PhotoImage(width=32, height=32)
@@ -147,18 +147,42 @@ class VoidClient:
         self.show_editor()
         self.check_startup_update()
 
+    def close_app(self):
+        if not getattr(self, "installing", False):
+            self.root.destroy()
+
     def check_startup_update(self):
         screen = tk.Frame(self.root, bg=BG)
         screen.pack(fill="both", expand=True)
-        Button(screen, "×", self.root.destroy).pack(anchor="ne", padx=5, pady=5)
+        exit_button = Button(screen, "×", self.root.destroy)
+        exit_button.pack(anchor="ne", padx=5, pady=5)
         content = tk.Frame(screen, bg=BG)
         content.place(relx=0.5, rely=0.5, anchor="center")
         heading = tk.Label(content, text="Checking for updates…", bg=BG, fg="white",
                            font=("Segoe UI", 17, "bold"))
         heading.pack(pady=(0, 14))
-        progress = ttk.Progressbar(content, mode="indeterminate", length=200)
-        progress.pack()
-        progress.start(15)
+        spinner = tk.Canvas(content, width=48, height=48, bg=BG, highlightthickness=0)
+        spinner.create_oval(6, 6, 42, 42, outline="#303030", width=3)
+        arc = spinner.create_arc(6, 6, 42, 42, start=0, extent=94,
+                                 style="arc", outline="white", width=3)
+        angle = 0
+        animation = None
+
+        def spin():
+            nonlocal angle, animation
+            angle = (angle - 11) % 360
+            spinner.itemconfigure(arc, start=angle)
+            animation = self.root.after(20, spin)
+
+        def show_spinner():
+            spinner.pack(pady=5)
+            spin()
+
+        def hide_spinner():
+            self.root.after_cancel(animation)
+            spinner.pack_forget()
+
+        show_spinner()
         result = SimpleQueue()
 
         def worker():
@@ -173,8 +197,7 @@ class VoidClient:
             except Empty:
                 self.root.after(50, show_result)
                 return
-            progress.stop()
-            progress.destroy()
+            hide_spinner()
             if not url:
                 screen.destroy()
                 self.window.pack(fill="both", expand=True)
@@ -182,11 +205,50 @@ class VoidClient:
                 return
             heading.configure(text="New Update")
 
-            def open_release():
-                if not webbrowser.open(url):
-                    messagebox.showinfo("New Update", url, parent=self.root)
+            def install():
+                self.installing = True
+                button.pack_forget()
+                exit_button.configure(state="disabled")
+                heading.configure(text="Installing update…")
+                show_spinner()
+                installed = SimpleQueue()
 
-            Button(content, "Install Update", open_release, primary=True).pack(ipadx=20)
+                def apply_update():
+                    try:
+                        install_update()
+                        installed.put(None)
+                    except Exception as error:
+                        installed.put(str(error))
+
+                def finish():
+                    try:
+                        error = installed.get_nowait()
+                    except Empty:
+                        self.root.after(50, finish)
+                        return
+                    self.installing = False
+                    hide_spinner()
+                    if error is None:
+                        try:
+                            subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
+                        except OSError as restart_error:
+                            heading.configure(text="Update installed")
+                            exit_button.configure(state="normal")
+                            messagebox.showerror("Restart VoidClient", str(restart_error), parent=self.root)
+                            return
+                        self.root.destroy()
+                        return
+                    exit_button.configure(state="normal")
+                    heading.configure(text="New Update")
+                    button.pack()
+                    messagebox.showerror("Update failed", error, parent=self.root)
+
+                Thread(target=apply_update, daemon=True).start()
+                self.root.after(50, finish)
+
+            button = Button(content, "Install Update", install, primary=True)
+            button.configure(width=164, height=44)
+            button.pack()
 
         Thread(target=worker, daemon=True).start()
         self.root.after(550, show_result)
