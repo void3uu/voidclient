@@ -46,6 +46,8 @@ def roblox_window():
     user32 = ctypes.windll.user32
     foreground = user32.GetForegroundWindow
     foreground.restype = wintypes.HWND
+    user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    user32.IsWindowVisible.argtypes = (wintypes.HWND,)
     candidates = []
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -344,10 +346,38 @@ class VoidClient:
         self.attach_status = tk.Label(self.attach, bg="#111111", fg="#aaa", text="Detached")
         self.attach_status.pack(anchor="w", padx=26, pady=12)
         self.attach_job = None
-
-    def attach_roblox(self):
+        self.profile_id = None
+        self.current_game = None
+        self.presence_status = tk.Label(self.roblox, bg="#111111", fg="#aaa")
+        self.presence_status.pack(anchor="w", padx=26, pady=(0, 8))
         self.attached.set(True)
         self.track_roblox()
+        self.refresh_presence()
+
+    def refresh_presence(self):
+        user_id = self.profile_id
+        if user_id is not None and self.game_window:
+            def work():
+                data = json.loads(fetch("https://presence.roblox.com/v1/presence/users",
+                                        {"userIds": [user_id]}))
+                return next(iter(data["userPresences"]), {})
+
+            def done(presence):
+                if self.profile_id != user_id or not self.game_window:
+                    return
+                place = presence.get("placeId")
+                self.current_game = str(place) if presence.get("userPresenceType") == 2 and isinstance(place, int) and place > 0 else None
+                title = presence.get("lastLocation") or f"Place {place}"
+                self.presence_status.configure(text=f"Current game: {title}" if self.current_game else
+                                               "Current game unavailable. Enter a place ID or link.")
+                if self.current_game:
+                    self.experience.delete(0, "end")
+                    self.experience.insert(0, self.current_game)
+
+            self.background(self.presence_status, work, done)
+        self.root.after(15000, self.refresh_presence)
+
+    def attach_roblox(self):
         self.load_profile()
 
     def server_hop(self):
@@ -362,6 +392,7 @@ class VoidClient:
             self.attach_status.configure(text="Detached")
             return
         game, foreground = roblox_window()
+        self.game_window = game
         self.root.attributes("-topmost", bool(game and (
             game == foreground or self.root.focus_displayof() is not None)))
         self.attach_status.configure(text="Roblox window linked" if game else "Waiting for Roblox…")
@@ -421,6 +452,7 @@ class VoidClient:
 
         def done(result):
             profile, image = result
+            self.profile_id = int(profile["id"])
             self.avatar.image = None
             try:
                 if image:

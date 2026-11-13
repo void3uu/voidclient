@@ -10,7 +10,7 @@ from time import time_ns
 from urllib.request import Request, urlopen
 
 # Increase this number on GitHub to publish an update.
-BUILD = 8
+BUILD = 9
 REPOSITORY = "void3uu/voidclient"
 
 
