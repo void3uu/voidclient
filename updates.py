@@ -2,7 +2,7 @@ import re
 from urllib.request import Request, urlopen
 
 # Increase this number on GitHub to publish an update.
-BUILD = 1
+BUILD = 2
 REPOSITORY = "void3uu/voidclient"
 
 
