@@ -63,6 +63,31 @@ def roblox_window():
     return (candidates[0] if candidates else None), foreground()
 
 
+def player_activity():
+    directory = Path(os.environ["LOCALAPPDATA"]) / "Roblox" / "logs"
+    files = list(directory.glob("*_Player_*.log"))
+    if not files:
+        return None, None, None
+    newest = max(files, key=lambda path: path.stat().st_ctime_ns)
+    with newest.open("rb") as log:
+        length = log.seek(0, 2)
+        log.seek(max(0, length - 2 * 1024 * 1024))
+        lines = log.read(2 * 1024 * 1024).decode("utf-8", errors="replace").splitlines()
+    user = place = job = None
+    for line in lines:
+        if "[FLog::GameJoinLoadTime] Report game_join_loadtime:" in line:
+            match = re.search(r"\buserid:([1-9][0-9]{0,18})\b", line)
+            if match:
+                user = int(match[1])
+        if "[FLog::" in line:
+            joined = re.search(r"Joining game '([0-9a-fA-F-]{36})' place ([1-9][0-9]{0,18})\b", line)
+            if joined:
+                job, place = joined.groups()
+            elif "Time to disconnect replication data" in line or "leaveUGCGameInternal" in line:
+                place = job = None
+    return user, place, job
+
+
 class VoidClient:
     def __init__(self, root):
         self.root = root
@@ -190,7 +215,7 @@ class VoidClient:
             if not url:
                 screen.destroy()
                 self.window.pack(fill="both", expand=True)
-                self.experience.focus_set()
+                self.server_list.focus_set()
                 return
             def install():
                 self.installing = True
@@ -299,7 +324,7 @@ class VoidClient:
 
         slide(0)
         if searching:
-            self.experience.focus_set()
+            self.server_list.focus_set()
         else:
             self.attach_tab.focus_set()
 
@@ -319,7 +344,7 @@ class VoidClient:
             Button(row, button, action, primary=True).pack(side="right")
             return entry
 
-        self.experience = field(content, "Experience link or place ID", "Server Hop", self.server_hop)
+        Button(content, "Server Hop", self.server_hop, primary=True).pack(anchor="w", pady=8)
         self.server_list = tk.Listbox(content, height=4, bg="#1b1b1b", fg="white",
                                       selectbackground="#383838", relief="flat", exportselection=False)
         self.server_list.pack(fill="both", expand=True, pady=8)
@@ -335,7 +360,7 @@ class VoidClient:
                  font=("Segoe UI Semibold", 23)).pack(anchor="w", padx=26, pady=(22, 12))
         attach_form = tk.Frame(self.attach, bg="#111111")
         attach_form.pack(fill="x", padx=26)
-        self.username = field(attach_form, "Your Roblox username", "Attach Roblox", self.attach_roblox)
+        Button(attach_form, "Attach Roblox", self.attach_roblox, primary=True).pack(anchor="w", pady=8)
         profile = tk.Frame(self.attach, bg="#111111")
         profile.pack(fill="x", padx=26, pady=8)
         self.avatar = tk.Label(profile, bg="#111111")
@@ -350,35 +375,32 @@ class VoidClient:
         self.current_game = None
         self.presence_status = tk.Label(self.roblox, bg="#111111", fg="#aaa")
         self.presence_status.pack(anchor="w", padx=26, pady=(0, 8))
-        self.attached.set(True)
-        self.track_roblox()
-        self.refresh_presence()
+        self.game_window = None
 
-    def refresh_presence(self):
-        user_id = self.profile_id
-        if user_id is not None and self.game_window:
-            def work():
-                data = json.loads(fetch("https://presence.roblox.com/v1/presence/users",
-                                        {"userIds": [user_id]}))
-                return next(iter(data["userPresences"]), {})
+    def detect_activity(self):
+        if not self.game_window:
+            self.current_game = None
+            self.presence_status.configure(text="Open Roblox Player and join a game.")
+            return
 
-            def done(presence):
-                if self.profile_id != user_id or not self.game_window:
-                    return
-                place = presence.get("placeId")
-                self.current_game = str(place) if presence.get("userPresenceType") == 2 and isinstance(place, int) and place > 0 else None
-                title = presence.get("lastLocation") or f"Place {place}"
-                self.presence_status.configure(text=f"Current game: {title}" if self.current_game else
-                                               "Current game unavailable. Enter a place ID or link.")
-                if self.current_game:
-                    self.experience.delete(0, "end")
-                    self.experience.insert(0, self.current_game)
+        def done(activity):
+            user, place, job = activity
+            if not self.game_window:
+                return
+            self.current_game = place
+            self.current_server = (place, job)
+            self.presence_status.configure(text=f"Current place: {place}" if place else "Waiting for a Roblox game…")
+            if user and user != self.profile_id:
+                self.load_profile(user)
+            elif not user and self.profile_id is None:
+                self.profile_status.configure(text="Account unavailable. Join a game in Roblox.")
 
-            self.background(self.presence_status, work, done)
-        self.root.after(15000, self.refresh_presence)
+        self.background(self.presence_status, player_activity, done)
 
     def attach_roblox(self):
-        self.load_profile()
+        self.attached.set(True)
+        self.track_roblox()
+        self.detect_activity()
 
     def server_hop(self):
         self.load_servers(hop=True)
@@ -396,6 +418,14 @@ class VoidClient:
         self.root.attributes("-topmost", bool(game and (
             game == foreground or self.root.focus_displayof() is not None)))
         self.attach_status.configure(text="Roblox window linked" if game else "Waiting for Roblox…")
+        if not game:
+            self.current_game = None
+        elif self.attached.get():
+            from time import monotonic
+            now = monotonic()
+            if now >= getattr(self, "next_activity_check", 0):
+                self.next_activity_check = now + 4
+                self.detect_activity()
         self.attach_job = self.root.after(350, self.track_roblox)
 
     def background(self, status, work, done):
@@ -426,18 +456,9 @@ class VoidClient:
         Thread(target=worker, daemon=True).start()
         self.root.after(60, poll)
 
-    def load_profile(self):
-        name = self.username.get().strip()
-        if not re.fullmatch(r"[A-Za-z0-9_]{1,20}", name):
-            self.profile_status.configure(text="Enter a Roblox username.")
-            return
-
+    def load_profile(self, user_id):
         def work():
-            profiles = json.loads(fetch("https://users.roblox.com/v1/usernames/users",
-                                        {"usernames": [name], "excludeBannedUsers": True}))["data"]
-            if not profiles:
-                raise ValueError("Username not found.")
-            profile = profiles[0]
+            profile = json.loads(fetch(f"https://users.roblox.com/v1/users/{user_id}"))
             try:
                 query = urlencode({"userIds": int(profile["id"]), "size": "60x60", "format": "Png"})
                 thumbnails = json.loads(fetch(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?{query}"))
@@ -465,10 +486,9 @@ class VoidClient:
         self.background(self.profile_status, work, done)
 
     def load_servers(self, hop=False):
-        try:
-            place = place_id(self.experience.get().strip())
-        except ValueError as error:
-            self.server_status.configure(text=str(error))
+        place = self.current_game
+        if not place:
+            self.server_status.configure(text="Attach Roblox while in a game first.")
             return
 
         def work():
@@ -485,7 +505,7 @@ class VoidClient:
             for index, (listed_place, server) in enumerate(self.servers, 1):
                 item = next(item for item in data if item["id"] == server)
                 self.server_list.insert("end", f"Server {index}   ·   {item['playing']}/{item['maxPlayers']} players")
-                if (listed_place, server) != self.last_server and not self.server_list.curselection():
+                if (listed_place, server) not in (self.last_server, self.current_server) and not self.server_list.curselection():
                     self.server_list.selection_set(index - 1)
             self.server_status.configure(text=f"{len(self.servers)} public servers found")
             if hop:
