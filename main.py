@@ -154,25 +154,27 @@ class VoidClient:
     def check_startup_update(self):
         screen = tk.Frame(self.root, bg=BG)
         screen.pack(fill="both", expand=True)
-        exit_button = Button(screen, "×", self.root.destroy)
+        exit_button = Button(screen, "×", self.close_app)
         exit_button.pack(anchor="ne", padx=5, pady=5)
         content = tk.Frame(screen, bg=BG)
         content.place(relx=0.5, rely=0.5, anchor="center")
-        heading = tk.Label(content, text="Checking for updates…", bg=BG, fg="white",
-                           font=("Segoe UI", 17, "bold"))
-        heading.pack(pady=(0, 14))
-        spinner = tk.Canvas(content, width=48, height=48, bg=BG, highlightthickness=0)
-        spinner.create_oval(6, 6, 42, 42, outline="#303030", width=3)
-        arc = spinner.create_arc(6, 6, 42, 42, start=0, extent=94,
+        tk.Label(content, text="voidclient", bg=BG, fg="white",
+                 font=("Segoe UI", 25, "bold")).pack(pady=(0, 18))
+        heading = tk.Label(content, text="Checking for updates…", bg=BG, fg="#bcbcbc",
+                           font=("Segoe UI", 11))
+        heading.pack(side="bottom", pady=(12, 0))
+        spinner = tk.Canvas(content, width=56, height=56, bg=BG, highlightthickness=0)
+        spinner.create_oval(7, 7, 49, 49, outline="#303030", width=3)
+        arc = spinner.create_arc(7, 7, 49, 49, start=0, extent=108,
                                  style="arc", outline="white", width=3)
         angle = 0
         animation = None
 
         def spin():
             nonlocal angle, animation
-            angle = (angle - 11) % 360
+            angle = (angle - 7) % 360
             spinner.itemconfigure(arc, start=angle)
-            animation = self.root.after(20, spin)
+            animation = self.root.after(16, spin)
 
         def show_spinner():
             spinner.pack(pady=5)
@@ -203,8 +205,6 @@ class VoidClient:
                 self.window.pack(fill="both", expand=True)
                 self.text.focus_set()
                 return
-            heading.configure(text="New Update")
-
             def install():
                 self.installing = True
                 button.pack_forget()
@@ -239,16 +239,16 @@ class VoidClient:
                         self.root.destroy()
                         return
                     exit_button.configure(state="normal")
-                    heading.configure(text="New Update")
-                    button.pack()
+                    heading.configure(text="Update failed")
+                    button.pack(pady=(10, 0))
                     messagebox.showerror("Update failed", error, parent=self.root)
 
                 Thread(target=apply_update, daemon=True).start()
                 self.root.after(50, finish)
 
-            button = Button(content, "Install Update", install, primary=True)
-            button.configure(width=164, height=44)
-            button.pack()
+            button = Button(content, "Retry Update", install, primary=True)
+            button.configure(width=152, height=42)
+            install()
 
         Thread(target=worker, daemon=True).start()
         self.root.after(550, show_result)
