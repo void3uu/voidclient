@@ -1,4 +1,5 @@
 import json
+from tkinter import ttk
 from queue import Empty, SimpleQueue
 from threading import Thread
 import re
@@ -155,6 +156,9 @@ class VoidClient:
         heading = tk.Label(content, text="Checking for updates…", bg=BG, fg="white",
                            font=("Segoe UI", 17, "bold"))
         heading.pack(pady=(0, 14))
+        progress = ttk.Progressbar(content, mode="indeterminate", length=200)
+        progress.pack()
+        progress.start(15)
         result = SimpleQueue()
 
         def worker():
@@ -169,6 +173,8 @@ class VoidClient:
             except Empty:
                 self.root.after(50, show_result)
                 return
+            progress.stop()
+            progress.destroy()
             if not url:
                 screen.destroy()
                 self.window.pack(fill="both", expand=True)
@@ -183,7 +189,7 @@ class VoidClient:
             Button(content, "Install Update", open_release, primary=True).pack(ipadx=20)
 
         Thread(target=worker, daemon=True).start()
-        self.root.after(50, show_result)
+        self.root.after(550, show_result)
 
     def start_drag(self, event):
         self.drag_offset = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())

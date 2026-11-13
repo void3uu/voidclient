@@ -1,4 +1,5 @@
 import re
+from time import time_ns
 from urllib.request import Request, urlopen
 
 # Increase this number on GitHub to publish an update.
@@ -8,7 +9,7 @@ REPOSITORY = "void3uu/voidclient"
 
 def check_update():
     request = Request(
-        f"https://raw.githubusercontent.com/{REPOSITORY}/main/updates.py",
+        f"https://raw.githubusercontent.com/{REPOSITORY}/main/updates.py?check={time_ns()}",
         headers={"User-Agent": "VoidClient", "Cache-Control": "no-cache"},
     )
     with urlopen(request, timeout=5) as response:
@@ -19,3 +20,4 @@ def check_update():
     if len(builds) == 1 and int(builds[0]) > BUILD:
         return f"https://github.com/{REPOSITORY}/archive/refs/heads/main.zip"
     return None
+
