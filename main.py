@@ -379,7 +379,7 @@ class VoidClient:
             child.destroy()
         top = tk.Frame(self.library, bg=BG)
         top.pack(fill="x", padx=20, pady=(18, 12))
-        tk.Label(top, text="Saved scripts", bg=BG, fg="white",
+        tk.Label(top, text="Saved", bg=BG, fg="white",
                  font=("Segoe UI", 16, "bold")).pack(side="left")
         count = len(self.scripts)
         tk.Label(top, text=f"{count} saved", bg=BG, fg="#9b9b9b",
@@ -387,16 +387,20 @@ class VoidClient:
 
         actions = tk.Frame(self.library, bg=BG)
         actions.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
-        Button(actions, "Editor", self.show_editor).pack(side="left")
         Button(actions, "Import", self.load).pack(side="left", padx=5)
 
+        list_panel = tk.Frame(self.library, bg="#191919", highlightthickness=1,
+                              highlightbackground="#303030")
+        list_panel.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        scrollbar = tk.Scrollbar(list_panel, orient="vertical", relief="flat")
         self.library_list = tk.Listbox(
-            self.library, bg="#191919", fg="#e8e8e8", selectbackground="#303030",
+            list_panel, bg="#191919", fg="#e8e8e8", selectbackground="#303030",
             selectforeground="white", font=("Segoe UI", 11), activestyle="none",
-            highlightthickness=1, highlightbackground="#303030", relief="flat",
-            exportselection=False,
+            highlightthickness=0, relief="flat", borderwidth=0,
+            exportselection=False, yscrollcommand=scrollbar.set,
         )
-        self.library_list.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        self.library_list.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+        scrollbar.configure(command=self.library_list.yview)
         names = sorted(self.scripts, key=lambda name: (not self.scripts[name]["favorite"], name.casefold()))
         for name in names:
             prefix = "★" if self.scripts[name]["favorite"] else "☆"
@@ -408,10 +412,12 @@ class VoidClient:
                 action(names[selection[0]])
 
         if names:
+            if len(names) > 10:
+                scrollbar.pack(side="right", fill="y", pady=4)
             self.library_list.selection_set(0)
             self.library_list.bind("<Double-Button-1>", lambda _: selected_action(self.open_script))
             self.library_list.bind("<Return>", lambda _: selected_action(self.open_script))
-            Button(actions, "Favorite", lambda: selected_action(self.favorite)).pack(side="right")
+            Button(actions, "Toggle Star", lambda: selected_action(self.favorite)).pack(side="right")
             Button(actions, "Open", lambda: selected_action(self.open_script), primary=True).pack(side="right", padx=5)
         else:
             self.library_list.insert("end", "  Save a script from the editor to add it here.")
