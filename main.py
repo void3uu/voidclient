@@ -1,8 +1,9 @@
-import base64
-import ipaddress
 import json
 import os
-from urllib.parse import urlencode
+import base64
+import ctypes
+from ctypes import wintypes
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from queue import Empty, SimpleQueue
 from threading import Thread
@@ -21,65 +22,43 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def ipinfo_lookup(address, token):
-    credentials = base64.b64encode(f"{token}:".encode()).decode()
-    request = Request(f"https://api.ipinfo.io/lite/{address}",
-                      headers={"Authorization": f"Basic {credentials}"})
+def fetch(url, payload=None):
+    request = Request(url, data=json.dumps(payload).encode() if payload else None,
+                      headers={"Content-Type": "application/json", "User-Agent": "VoidClient"})
     with build_opener(NoRedirect()).open(request, timeout=8) as response:
-        data = json.loads(response.read(16384))
-    return "\n".join((
-        f"IP: {address}",
-        f"Country: {data.get('country') or 'Unknown'}",
-        f"Network: {data.get('asn') or 'Unknown'} · {data.get('as_name') or 'Unknown'}",
-        "Data by IPinfo",
-    ))
+        data = response.read(1048577)
+    if len(data) > 1048576:
+        raise ValueError("Roblox response exceeded the size limit.")
+    return data
 
 
-def routing_lookup(address):
-    query = urlencode({"resource": str(address)})
-    url = f"https://stat.ripe.net/data/network-info/data.json?{query}"
-    with build_opener(NoRedirect()).open(url, timeout=8) as response:
-        payload = json.loads(response.read(65536))
-    if payload.get("status") != "ok":
-        raise ValueError("RIPEstat lookup failed.")
-    data = payload["data"]
-    networks = ", ".join(f"AS{asn}" for asn in data.get("asns", []))
-    return "\n".join((f"IP: {address}", f"Prefix: {data.get('prefix') or 'Unavailable'}",
-                      f"Announcing ASNs: {networks or 'Unavailable'}", "Data by RIPEstat"))
+def place_id(value):
+    if re.fullmatch(r"[1-9][0-9]{0,18}", value):
+        return value
+    url = urlsplit(value)
+    match = re.match(r"/games/([1-9][0-9]{0,18})(?:/|$)", url.path)
+    if url.scheme == "https" and url.netloc.lower() in ("roblox.com", "www.roblox.com") and match:
+        return match[1]
+    raise ValueError("Enter a Roblox experience URL or place ID.")
 
 
-def domain_lookup(domain, token):
-    opener = build_opener(NoRedirect())
-    sections = []
-    for kind, number in (("A", 1), ("AAAA", 28), ("MX", 15), ("NS", 2)):
-        query = urlencode({"name": domain, "type": kind})
-        try:
-            with opener.open(f"https://dns.google/resolve?{query}", timeout=4) as response:
-                data = json.loads(response.read(65536))
-            status = data.get("Status")
-            if status == 3:
-                sections.append(f"{kind}: domain not found")
-                break
-            if status != 0:
-                sections.append(f"{kind}: DNS error ({status})")
-                continue
-            records = [record["data"] for record in data.get("Answer", [])
-                       if record.get("type") == number and isinstance(record.get("data"), str)]
-            sections.append(f"{kind}: " + (", ".join(records[:4]) or "No records"))
-        except (OSError, ValueError):
-            sections.append(f"{kind}: lookup unavailable")
-    result = ["Google Public DNS", *sections]
-    if token:
-        request = Request(f"https://www.virustotal.com/api/v3/domains/{domain}",
-                          headers={"x-apikey": token})
-        try:
-            with opener.open(request, timeout=5) as response:
-                data = json.loads(response.read(524288))
-            stats = data["data"]["attributes"]["last_analysis_stats"]
-            result.append(f"VirusTotal: {stats['malicious']} malicious · {stats['suspicious']} suspicious")
-        except (OSError, ValueError, KeyError, TypeError):
-            result.append("VirusTotal: report unavailable. Check your key and quota.")
-    return "\n".join(result)
+def roblox_window():
+    user32 = ctypes.windll.user32
+    foreground = user32.GetForegroundWindow
+    foreground.restype = wintypes.HWND
+    candidates = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @callback_type
+    def visit(hwnd, _):
+        title = ctypes.create_unicode_buffer(128)
+        user32.GetWindowTextW(hwnd, title, len(title))
+        if user32.IsWindowVisible(hwnd) and title.value == "Roblox":
+            candidates.append(hwnd)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return (candidates[0] if candidates else None), foreground()
 
 
 class VoidClient:
@@ -134,29 +113,23 @@ class VoidClient:
         tk.Frame(window, bg="#333333", height=1).pack(fill="x")
         body = tk.Frame(window, bg="#111111")
         body.pack(fill="both", expand=True)
-        rail = tk.Frame(body, bg=BG, width=64)
+        rail = tk.Frame(body, bg=BG, width=132)
         rail.pack(side="left", fill="y")
         rail.pack_propagate(False)
-        self.search_tab = Button(rail, "⌕", lambda: self.show_page(self.lookup))
-        self.search_tab.pack(pady=(11, 5))
-        self.settings_tab = Button(rail, "⚙", lambda: self.show_page(self.settings))
-        self.settings_tab.pack(side="bottom", pady=10)
+        self.roblox_tab = Button(rail, "Roblox Stuff", lambda: self.show_page(self.roblox))
+        self.roblox_tab.pack(pady=(11, 5))
+        self.attach_tab = Button(rail, "Attach Stuff", lambda: self.show_page(self.attach))
+        self.attach_tab.pack(side="bottom", pady=10)
         tk.Frame(body, bg="#2a2a2a", width=1).pack(side="left", fill="y")
         pages = tk.Frame(body, bg="#111111")
         pages.pack(fill="both", expand=True)
-        self.lookup = tk.Frame(pages, bg="#111111")
-        self.settings = tk.Frame(pages, bg="#111111")
-        card = tk.Frame(self.settings, bg="#191919", highlightthickness=1,
-                        highlightbackground="#303030")
-        card.pack(fill="x", padx=34, pady=34)
-        tk.Label(card, text="Settings", bg="#191919", fg="white",
-                 font=("Segoe UI Semibold", 20)).pack(anchor="w", padx=20, pady=(16, 3))
-        tk.Label(card, text="Coming soon", bg="#191919", fg="#aaa",
-                 font=("Segoe UI", 11)).pack(anchor="w", padx=20, pady=(0, 17))
+        self.roblox = tk.Frame(pages, bg="#111111")
+        self.attach = tk.Frame(pages, bg="#111111")
         self.page = None
         self.transition = None
-        self.build_lookup()
-        self.show_page(self.lookup)
+        self.last_server = None
+        self.build_companion()
+        self.show_page(self.roblox)
         self.check_startup_update()
 
     def close_app(self):
@@ -215,7 +188,7 @@ class VoidClient:
             if not url:
                 screen.destroy()
                 self.window.pack(fill="both", expand=True)
-                self.query_entry.focus_set()
+                self.experience.focus_set()
                 return
             def install():
                 self.installing = True
@@ -313,10 +286,9 @@ class VoidClient:
         if self.page is not None:
             self.page.place_forget()
         self.page = page
-        searching = page is self.lookup
-        self.search_tab.state(active=searching)
-        self.settings_tab.state(active=not searching)
-        self.refresh_placeholder()
+        searching = page is self.roblox
+        self.roblox_tab.state(active=searching)
+        self.attach_tab.state(active=not searching)
 
         def slide(frame):
             offset = round(12 * (1 - frame / 7) ** 3)
@@ -325,115 +297,186 @@ class VoidClient:
 
         slide(0)
         if searching:
-            self.query_entry.focus_set()
+            self.experience.focus_set()
         else:
-            self.settings_tab.focus_set()
+            self.attach_tab.focus_set()
 
-    def build_lookup(self):
-        content = tk.Frame(self.lookup, bg="#111111")
-        content.pack(fill="both", expand=True, padx=34, pady=(42, 20))
-        tk.Label(content, text="OSINT", fg="white", bg="#111111",
-                 font=("Segoe UI Semibold", 28)).pack(anchor="w")
-        tk.Label(content, text="Inspect public DNS or check identifier formats locally.",
-                 fg="#aaa", bg="#111111", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 20))
-        bar = tk.Frame(content, bg=BG, highlightthickness=1, highlightbackground="#3a3a3a")
-        bar.pack(fill="x")
-        self.query = tk.StringVar()
-        self.query_entry = tk.Entry(bar, textvariable=self.query, bg=BG, fg="white",
-                                    insertbackground="white", relief="flat", font=("Segoe UI", 13))
-        self.query_entry.pack(side="left", fill="both", expand=True, padx=13)
-        placeholder = tk.Label(self.query_entry, bg=BG, font=("Segoe UI", 12), cursor="xterm")
-        placeholder.bind("<Button-1>", lambda _: self.query_entry.focus_set())
-        Button(bar, "Search", self.search_lookup, primary=True).pack(side="right", padx=5, pady=5)
-        self.query_entry.bind("<Return>", lambda _: self.search_lookup())
-        self.lookup_result = tk.Label(content, text="", fg="#ddd", bg="#111111",
-                                      justify="left", anchor="nw", font=("Segoe UI", 11), wraplength=570)
-        self.lookup_result.pack(fill="x", pady=18)
-        examples = ("Phone number", "Email", "Name", "Discord ID")
-        self.placeholder_job = None
+    def build_companion(self):
+        content = tk.Frame(self.roblox, bg="#111111")
+        content.pack(fill="both", expand=True, padx=26, pady=20)
+        tk.Label(content, text="Roblox Stuff", bg="#111111", fg="white",
+                 font=("Segoe UI Semibold", 23)).pack(anchor="w")
+        def field(parent, label, button, action):
+            tk.Label(parent, text=label, bg="#111111", fg="#aaa").pack(anchor="w", pady=(5, 2))
+            row = tk.Frame(parent, bg="#111111")
+            row.pack(fill="x")
+            entry = tk.Entry(row, bg="#222222", fg="white", insertbackground="white",
+                             relief="flat", font=("Segoe UI", 11))
+            entry.pack(side="left", fill="both", expand=True, padx=(0, 8))
+            entry.bind("<Return>", lambda _: action())
+            Button(row, button, action, primary=True).pack(side="right")
+            return entry
 
-        def animate(frame=0):
-            self.placeholder_job = None
-            if self.query.get() or self.page is not self.lookup:
-                return
-            phase = frame % 40
-            shade = 66 + min(phase, 39-phase, 6) * 15
-            placeholder.configure(text=examples[(frame // 40) % len(examples)],
-                                  fg=f"#{shade:02x}{shade:02x}{shade:02x}")
-            placeholder.place(x=0, rely=.5, anchor="w")
-            self.placeholder_job = self.root.after(55, animate, frame+1)
+        self.experience = field(content, "Experience link or place ID", "Server Hop", self.server_hop)
+        self.server_list = tk.Listbox(content, height=4, bg="#1b1b1b", fg="white",
+                                      selectbackground="#383838", relief="flat", exportselection=False)
+        self.server_list.pack(fill="both", expand=True, pady=8)
+        footer = tk.Frame(content, bg="#111111")
+        footer.pack(fill="x")
+        self.server_status = tk.Label(footer, bg="#111111", fg="#aaa", text="")
+        self.server_status.pack(side="left")
+        Button(footer, "Join Selected", self.join_server).pack(side="right")
+        self.server_list.bind("<Double-Button-1>", lambda _: self.join_server())
+        self.servers = []
+        self.attached = tk.BooleanVar()
+        tk.Label(self.attach, text="Attach Stuff", bg="#111111", fg="white",
+                 font=("Segoe UI Semibold", 23)).pack(anchor="w", padx=26, pady=(22, 12))
+        attach_form = tk.Frame(self.attach, bg="#111111")
+        attach_form.pack(fill="x", padx=26)
+        self.username = field(attach_form, "Your Roblox username", "Attach Roblox", self.attach_roblox)
+        profile = tk.Frame(self.attach, bg="#111111")
+        profile.pack(fill="x", padx=26, pady=8)
+        self.avatar = tk.Label(profile, bg="#111111")
+        self.avatar.pack(side="left", padx=(0, 10))
+        self.profile_status = tk.Label(profile, text="Load your public profile", bg="#111111", fg="#ddd")
+        self.profile_status.pack(side="left")
 
-        def refresh_placeholder(*_):
-            if self.placeholder_job is not None:
-                self.root.after_cancel(self.placeholder_job)
-                self.placeholder_job = None
-            placeholder.place_forget()
-            animate()
+        self.attach_status = tk.Label(self.attach, bg="#111111", fg="#aaa", text="Detached")
+        self.attach_status.pack(anchor="w", padx=26, pady=12)
+        self.attach_job = None
 
-        self.refresh_placeholder = refresh_placeholder
-        self.query.trace_add("write", refresh_placeholder)
-        refresh_placeholder()
+    def attach_roblox(self):
+        self.attached.set(True)
+        self.track_roblox()
+        self.load_profile()
 
-    def search_lookup(self):
-        value = self.query.get().strip()
-        if not value:
-            self.lookup_result.configure(text="Enter a domain or identifier.")
+    def server_hop(self):
+        self.load_servers(hop=True)
+
+    def track_roblox(self):
+        if self.attach_job is not None:
+            self.root.after_cancel(self.attach_job)
+            self.attach_job = None
+        if not self.attached.get():
+            self.root.attributes("-topmost", False)
+            self.attach_status.configure(text="Detached")
             return
-        try:
-            address = ipaddress.ip_address(value)
-        except ValueError:
-            address = None
-        if address is not None:
-            self.lookup_request = None
-            token = os.environ.get("VOIDCLIENT_IPINFO_TOKEN", "").strip()
-            if not address.is_global or address.is_multicast or "%" in value:
-                self.lookup_result.configure(text="Enter a public unicast IP address.")
-            elif not token:
-                self.lookup_result.configure(text="Looking up IP address…")
-                self.start_lookup(value, lambda: routing_lookup(address), "RIPEstat lookup failed.")
-            else:
-                self.lookup_result.configure(text="Looking up IP address…")
-                self.start_lookup(value, lambda: ipinfo_lookup(address, token), "IPinfo lookup failed. Check your token and connection.")
-            return
-        if re.fullmatch(r"[0-9]{17,20}", value) and 0 < int(value) < 2**64:
-            from datetime import datetime, timezone
-            created = datetime.fromtimestamp(((int(value) >> 22) + 1420070400000) / 1000, timezone.utc)
-            result = f"Discord ID format · Embedded timestamp {created:%Y-%m-%d %H:%M UTC}"
-        elif re.fullmatch(r"[+][1-9][0-9]{6,14}", re.sub(r"[ ()-]", "", value)):
-            result = "International phone number format · Ownership unverified."
-        elif re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
-            result = f"Email format · Domain: {value.rsplit('@', 1)[1]}"
-        elif re.fullmatch(r"(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}", value):
-            self.lookup_result.configure(text=f"Resolving {value}…")
-            token = os.environ.get("VOIDCLIENT_VIRUSTOTAL_KEY", "").strip()
-            self.start_lookup(value, lambda: domain_lookup(value, token), "Domain lookup failed.")
-            return
-        else:
-            result = "Name entered. This app checks identifier formats and public domain DNS."
-        self.lookup_request = None
-        self.lookup_result.configure(text=result)
+        game, foreground = roblox_window()
+        self.root.attributes("-topmost", bool(game and (
+            game == foreground or self.root.focus_displayof() is not None)))
+        self.attach_status.configure(text="Roblox window linked" if game else "Waiting for Roblox…")
+        self.attach_job = self.root.after(350, self.track_roblox)
 
-    def start_lookup(self, value, action, failure):
+    def background(self, status, work, done):
+        if getattr(status, "busy", False):
+            return
+        status.busy = True
+        status.configure(text="Loading…")
         results = SimpleQueue()
-        request = object()
-        self.lookup_request = request
 
         def worker():
             try:
-                results.put(action())
-            except (OSError, ValueError, AttributeError, KeyError, TypeError):
-                results.put(failure)
+                results.put((work(), None))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+                results.put((None, str(error)))
 
-        def show_result():
-            if self.lookup_request is not request or self.query.get().strip() != value:
-                return
+        def poll():
             try:
-                self.lookup_result.configure(text=results.get_nowait())
+                data, error = results.get_nowait()
             except Empty:
-                self.root.after(75, show_result)
+                self.root.after(60, poll)
+                return
+            status.busy = False
+            if error:
+                status.configure(text=error[:90])
+            else:
+                done(data)
 
         Thread(target=worker, daemon=True).start()
-        self.root.after(75, show_result)
+        self.root.after(60, poll)
+
+    def load_profile(self):
+        name = self.username.get().strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,20}", name):
+            self.profile_status.configure(text="Enter a Roblox username.")
+            return
+
+        def work():
+            profiles = json.loads(fetch("https://users.roblox.com/v1/usernames/users",
+                                        {"usernames": [name], "excludeBannedUsers": True}))["data"]
+            if not profiles:
+                raise ValueError("Username not found.")
+            profile = profiles[0]
+            try:
+                query = urlencode({"userIds": int(profile["id"]), "size": "60x60", "format": "Png"})
+                thumbnails = json.loads(fetch(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?{query}"))
+                for item in thumbnails["data"]:
+                    url = item.get("imageUrl") or ""
+                    parts = urlsplit(url)
+                    if parts.scheme == "https" and re.fullmatch(r"tr\.rbxcdn\.com", parts.netloc):
+                        return profile, fetch(url)
+            except (OSError, ValueError, KeyError):
+                pass
+            return profile, None
+
+        def done(result):
+            profile, image = result
+            self.avatar.image = None
+            try:
+                if image:
+                    self.avatar.image = tk.PhotoImage(data=base64.b64encode(image), format="png")
+            except tk.TclError:
+                pass
+            self.avatar.configure(image=self.avatar.image or "")
+            self.profile_status.configure(text=f"{profile['displayName']}  ·  @{profile['name']}")
+
+        self.background(self.profile_status, work, done)
+
+    def load_servers(self, hop=False):
+        try:
+            place = place_id(self.experience.get().strip())
+        except ValueError as error:
+            self.server_status.configure(text=str(error))
+            return
+
+        def work():
+            url = f"https://games.roblox.com/v1/games/{place}/servers/Public?excludeFullGames=true&limit=25"
+            return json.loads(fetch(url))["data"]
+
+        def done(data):
+            self.servers = [(place, item["id"]) for item in data
+                            if re.fullmatch(r"[a-fA-F0-9-]{36}", item.get("id", ""))
+                            and isinstance(item.get("playing"), int)
+                            and isinstance(item.get("maxPlayers"), int)
+                            and item["playing"] < item["maxPlayers"]]
+            self.server_list.delete(0, "end")
+            for index, (listed_place, server) in enumerate(self.servers, 1):
+                item = next(item for item in data if item["id"] == server)
+                self.server_list.insert("end", f"Server {index}   ·   {item['playing']}/{item['maxPlayers']} players")
+                if (listed_place, server) != self.last_server and not self.server_list.curselection():
+                    self.server_list.selection_set(index - 1)
+            self.server_status.configure(text=f"{len(self.servers)} public servers found")
+            if hop:
+                if self.server_list.curselection():
+                    self.join_server()
+                else:
+                    self.server_status.configure(text="No different public server available.")
+
+        self.background(self.server_status, work, done)
+
+    def join_server(self):
+        selection = self.server_list.curselection()
+        if not selection:
+            self.server_status.configure(text="Select a public server first.")
+            return
+        place, server = self.servers[selection[0]]
+        try:
+            os.startfile(f"roblox://placeId={place}&gameInstanceId={server}")
+        except OSError:
+            self.server_status.configure(text="Could not open Roblox. Check that Roblox is installed.")
+            return
+        self.last_server = (place, server)
+        self.server_status.configure(text="Join requested in Roblox.")
 
 
 if __name__ == "__main__":
