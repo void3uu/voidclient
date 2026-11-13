@@ -10,7 +10,7 @@ class Button(tk.Canvas):
         self.last_draw = None
         self.fill = None
         self.animation = None
-        icon = label in ("×", "−", "</>", "☷")
+        icon = label in ("×", "−", "</>", "☷", "⌕", "⚙")
         super().__init__(parent, width=38 if icon else max(86, len(label) * 8 + 22), height=39, bg=BG,
                          highlightthickness=0, takefocus=True, cursor="hand2")
         for event, callback in (
@@ -65,7 +65,7 @@ class Button(tk.Canvas):
         self.delete("all")
         x, y = w / 2, h / 2
         label = self.label
-        icon = label in ("×", "−", "</>", "☷")
+        icon = label in ("×", "−", "</>", "☷", "⌕", "⚙")
         fill = "#c9c9c9" if self.pressed else "#eeeeee" if self.hover else "#ffffff"
         ink = "#131313" if self.primary else "#888888"
         if self.hover or self.active or not icon:
@@ -100,6 +100,11 @@ class Button(tk.Canvas):
             line(-5, 5, 5, -5)
         elif label == "−":
             line(-6, 0, 6, 0)
+        elif label == "⚙":
+            self.create_text(x, y, text=label, fill=ink, font=("Segoe UI Symbol", 15))
+        elif label == "⌕":
+            self.create_oval(x-8, y-8, x+3, y+3, outline=ink, width=2)
+            line(2, 2, 8, 8)
         elif label == "</>":
             line(-5, -4, -9, 0, -5, 4)
             line(5, -4, 9, 0, 5, 4)

@@ -1,68 +1,72 @@
+import base64
+import ipaddress
 import json
+import os
+from urllib.parse import urlencode
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from queue import Empty, SimpleQueue
 from threading import Thread
 import re
 import tkinter as tk
-import winsound
 import subprocess
 import sys
 from updates import check_update, install_update
 from pathlib import Path
-from tkinter import messagebox, simpledialog
-from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, build_opener
+from tkinter import messagebox
 
 from chrome import BG, Button
 
-DEMO = '-- VoidClient demo\nprint("Hello, World!")\nwait(2)\nprint("Done.")'
-LIMIT = 16384
-STORE = Path.home() / ".voidclient-scripts.json"
-
-
 class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(self, *args):
         return None
 
 
-def import_raw(value):
-    value = value.strip()
-    wrapper = re.fullmatch(r"""loadstring\(\s*(["'])(https://[^\s"']+)\1\s*\)(?:\(\))?""", value)
-    url = wrapper[2] if wrapper else value
-    parts = urlsplit(url)
-    if (parts.scheme, parts.netloc) != ("https", "raw.githubusercontent.com") or len(parts.path.split("/")) < 5:
-        raise ValueError("Use a public GitHub Raw file URL.")
-    with build_opener(NoRedirect()).open(url, timeout=5) as response:
-        content = response.read(LIMIT + 1)
-    if len(content) > LIMIT:
-        raise ValueError("The file exceeds 16 KB.")
-    return content.decode("utf-8")
+def ipinfo_lookup(address, token):
+    credentials = base64.b64encode(f"{token}:".encode()).decode()
+    request = Request(f"https://api.ipinfo.io/lite/{address}",
+                      headers={"Authorization": f"Basic {credentials}"})
+    with build_opener(NoRedirect()).open(request, timeout=8) as response:
+        data = json.loads(response.read(16384))
+    return "\n".join((
+        f"IP: {address}",
+        f"Country: {data.get('country') or 'Unknown'}",
+        f"Network: {data.get('asn') or 'Unknown'} · {data.get('as_name') or 'Unknown'}",
+        "Data by IPinfo",
+    ))
 
 
-def parse(source):
-    if len(source.encode()) > LIMIT:
-        raise ValueError("Scripts must be 16 KB or smaller.")
-    steps = []
-    total = 0
-    for number, line in enumerate(source.splitlines(), 1):
-        line = line.strip()
-        if not line or line.startswith("--"):
-            continue
-        if line == "sound_button()":
-            steps.append(None)
-            continue
-        match = re.fullmatch(r'print\(("(?:[^"\\]|\\.)*")\)', line)
-        if match:
-            steps.append(json.loads(match[1]))
-            continue
-        match = re.fullmatch(r"wait\((\d{1,2}(?:\.\d{1,3})?)\)", line)
-        if match:
-            delay = round(float(match[1]) * 1000)
-            total += delay
-            if total <= 30000:
-                steps.append(delay)
+def domain_lookup(domain, token):
+    opener = build_opener(NoRedirect())
+    sections = []
+    for kind, number in (("A", 1), ("AAAA", 28), ("MX", 15), ("NS", 2)):
+        query = urlencode({"name": domain, "type": kind})
+        try:
+            with opener.open(f"https://dns.google/resolve?{query}", timeout=4) as response:
+                data = json.loads(response.read(65536))
+            status = data.get("Status")
+            if status == 3:
+                sections.append(f"{kind}: domain not found")
+                break
+            if status != 0:
+                sections.append(f"{kind}: DNS error ({status})")
                 continue
-        raise ValueError(f'Line {number}: use print("text"), sound_button(), or wait(seconds), with at most 30 seconds of total waits.')
-    return steps
+            records = [record["data"] for record in data.get("Answer", [])
+                       if record.get("type") == number and isinstance(record.get("data"), str)]
+            sections.append(f"{kind}: " + (", ".join(records[:4]) or "No records"))
+        except (OSError, ValueError):
+            sections.append(f"{kind}: lookup unavailable")
+    result = ["Google Public DNS", *sections]
+    if token:
+        request = Request(f"https://www.virustotal.com/api/v3/domains/{domain}",
+                          headers={"x-apikey": token})
+        try:
+            with opener.open(request, timeout=5) as response:
+                data = json.loads(response.read(524288))
+            stats = data["data"]["attributes"]["last_analysis_stats"]
+            result.append(f"VirusTotal: {stats['malicious']} malicious · {stats['suspicious']} suspicious")
+        except (OSError, ValueError, KeyError, TypeError):
+            result.append("VirusTotal: report unavailable. Check your key and quota.")
+    return "\n".join(result)
 
 
 class VoidClient:
@@ -83,29 +87,30 @@ class VoidClient:
         for rect in ((7, 7, 15, 10), (7, 7, 10, 15), (18, 7, 26, 10),
                      (23, 7, 26, 15), (15, 15, 18, 26)):
             self.icon.put("#ffffff", to=rect)
-        root.iconphoto(True, self.icon)
+        icon_path = Path(__file__).with_name("duck.ico")
+        if icon_path.is_file():
+            root.iconbitmap(default=str(icon_path))
+        else:
+            root.iconphoto(True, self.icon)
         self.taskbar_refresh_done = False
         root.after_idle(self.show_taskbar_icon)
-        self.scripts = {}
-        try:
-            data = json.loads(STORE.read_text(encoding="utf-8"))
-            self.scripts = {name: entry for name, entry in data.items()
-                            if isinstance(entry.get("source"), str) and isinstance(entry.get("favorite"), bool)}
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError, AttributeError):
-            messagebox.showerror("Saved scripts", "The saved scripts file could not be read.")
         window = tk.Frame(root, bg=BG, highlightthickness=1, highlightbackground="#262626")
         self.window = window
         header = tk.Frame(window, bg=BG, height=44)
         header.pack(fill="x")
         header.pack_propagate(False)
-        logo = tk.Canvas(header, width=26, height=26, bg=BG, highlightthickness=0)
-        logo.pack(side="left", padx=(14, 5))
-        logo.create_line(13, 22, 13, 13, 6, 6, fill="white", width=2)
-        logo.create_line(6, 11, 6, 6, 11, 6, fill="white", width=2)
-        logo.create_line(15, 11, 20, 6, 20, 11, fill="white", width=2)
-        logo.create_line(15, 6, 20, 6, fill="white", width=2)
+        duck_path = Path(__file__).with_name("duck-title.png")
+        if duck_path.is_file():
+            self.duck_logo = tk.PhotoImage(file=str(duck_path))
+            logo = tk.Label(header, image=self.duck_logo, bg=BG, bd=0)
+            logo.pack(side="left", padx=(14, 7))
+        else:
+            logo = tk.Canvas(header, width=26, height=26, bg=BG, highlightthickness=0)
+            logo.pack(side="left", padx=(14, 5))
+            logo.create_line(13, 22, 13, 13, 6, 6, fill="white", width=2)
+            logo.create_line(6, 11, 6, 6, 11, 6, fill="white", width=2)
+            logo.create_line(15, 11, 20, 6, 20, 11, fill="white", width=2)
+            logo.create_line(15, 6, 20, 6, fill="white", width=2)
         title = tk.Label(header, text="voidclient", bg=BG, fg="white", font=("Segoe UI", 10, "bold"))
         title.pack(side="left")
         for target in (header, title, logo):
@@ -114,48 +119,31 @@ class VoidClient:
         Button(header, "×", root.destroy).pack(side="right", padx=(0, 3))
         Button(header, "−", self.minimize).pack(side="right")
         tk.Frame(window, bg="#333333", height=1).pack(fill="x")
-        body = tk.Frame(window, bg=BG)
+        body = tk.Frame(window, bg="#111111")
         body.pack(fill="both", expand=True)
-        nav = tk.Frame(body, bg=BG, width=56)
-        nav.pack(side="left", fill="y")
-        nav.pack_propagate(False)
-        self.editor_tab = Button(nav, "</>", self.show_editor)
-        self.editor_tab.pack(pady=(8, 9))
-        self.library_tab = Button(nav, "☷", self.show_library)
-        self.library_tab.pack(pady=(12, 0))
-        tk.Frame(body, bg="#333333", width=1).pack(side="left", fill="y")
-        self.views = tk.Frame(body, bg=BG)
-        self.views.pack(fill="both", expand=True)
-        self.view_motion = None
-        self.editor = tk.Frame(self.views, bg=BG)
-        self.library = tk.Frame(self.views, bg=BG)
-        tab_bar = tk.Frame(self.editor, bg="#1b1b1b", height=35)
-        tab_bar.pack(fill="x")
-        tab_bar.pack_propagate(False)
-        tab = tk.Frame(tab_bar, bg="#111111")
-        tab.pack(side="left", fill="y")
-        tk.Label(tab, text="Script", bg="#111111", fg="#dedede",
-                 font=("Segoe UI Semibold", 9)).pack(padx=18, pady=8)
-        footer = tk.Frame(self.editor, bg=BG)
-        footer.pack(side="bottom", fill="x", padx=9, pady=7)
-        Button(footer, "Run", self.run, primary=True).pack(side="left")
-        Button(footer, "Import", self.load).pack(side="left", padx=5)
-        Button(footer, "Save", self.save).pack(side="left")
-        tk.Frame(self.editor, bg="#292929", height=1).pack(side="bottom", fill="x")
-        self.lines = tk.Text(self.editor, width=5, bg="#111111", fg="#77848f", bd=0,
-                             font=("Consolas", 10), padx=8, pady=10, state="disabled")
-        self.lines.pack(side="left", fill="y")
-        self.text = tk.Text(self.editor, bg="#111111", fg="#a5d2ff", insertbackground="white",
-                            bd=0, font=("Consolas", 10), padx=10, pady=10, wrap="none",
-                            undo=True, yscrollcommand=self.sync_lines)
-        self.text.pack(fill="both", expand=True)
-        self.text.tag_configure("keyword", foreground="#55a5ee")
-        self.text.tag_configure("string", foreground="#ec9873")
-        self.text.tag_configure("comment", foreground="#73818c")
-        self.refresh_job = None
-        self.text.bind("<<Modified>>", self.schedule_refresh)
-        self.replace(DEMO)
-        self.show_editor()
+        rail = tk.Frame(body, bg=BG, width=64)
+        rail.pack(side="left", fill="y")
+        rail.pack_propagate(False)
+        self.search_tab = Button(rail, "⌕", lambda: self.show_page(self.lookup))
+        self.search_tab.pack(pady=(11, 5))
+        self.settings_tab = Button(rail, "⚙", lambda: self.show_page(self.settings))
+        self.settings_tab.pack(side="bottom", pady=10)
+        tk.Frame(body, bg="#2a2a2a", width=1).pack(side="left", fill="y")
+        pages = tk.Frame(body, bg="#111111")
+        pages.pack(fill="both", expand=True)
+        self.lookup = tk.Frame(pages, bg="#111111")
+        self.settings = tk.Frame(pages, bg="#111111")
+        card = tk.Frame(self.settings, bg="#191919", highlightthickness=1,
+                        highlightbackground="#303030")
+        card.pack(fill="x", padx=34, pady=34)
+        tk.Label(card, text="Settings", bg="#191919", fg="white",
+                 font=("Segoe UI Semibold", 20)).pack(anchor="w", padx=20, pady=(16, 3))
+        tk.Label(card, text="Coming soon", bg="#191919", fg="#aaa",
+                 font=("Segoe UI", 11)).pack(anchor="w", padx=20, pady=(0, 17))
+        self.page = None
+        self.transition = None
+        self.build_lookup()
+        self.show_page(self.lookup)
         self.check_startup_update()
 
     def close_app(self):
@@ -214,7 +202,7 @@ class VoidClient:
             if not url:
                 screen.destroy()
                 self.window.pack(fill="both", expand=True)
-                self.text.focus_set()
+                self.query_entry.focus_set()
                 return
             def install():
                 self.installing = True
@@ -240,6 +228,9 @@ class VoidClient:
                     self.installing = False
                     hide_spinner()
                     if error is None:
+                        if getattr(sys, "frozen", False):
+                            self.root.destroy()
+                            return
                         try:
                             subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
                         except OSError as restart_error:
@@ -301,288 +292,134 @@ class VoidClient:
             self.root.overrideredirect(True)
             self.root.after_idle(self.show_taskbar_icon)
 
-    def button(self, parent, label, command, primary=False):
-        return tk.Button(parent, text=label, command=command, relief="flat",
-                         bg="white" if primary else BG, fg="#111111" if primary else "#eeeeee",
-                         activebackground="#363636", activeforeground="white",
-                         font=("Segoe UI", 10), padx=12, pady=7, cursor="hand2")
-
-    def sync_lines(self, first, _last):
-        self.lines.yview_moveto(first)
-
-    def schedule_refresh(self, _event=None):
-        if not self.text.edit_modified():
+    def show_page(self, page):
+        if page is self.page:
             return
-        self.text.edit_modified(False)
-        if self.refresh_job is not None:
-            self.root.after_cancel(self.refresh_job)
-        self.refresh_job = self.root.after(65, self.refresh)
+        if self.transition is not None:
+            self.root.after_cancel(self.transition)
+        if self.page is not None:
+            self.page.place_forget()
+        self.page = page
+        searching = page is self.lookup
+        self.search_tab.state(active=searching)
+        self.settings_tab.state(active=not searching)
+        self.refresh_placeholder()
 
-    def refresh(self):
-        self.refresh_job = None
-        source = self.source()
-        lines = source[:LIMIT].split("\n")
-        self.lines.configure(state="normal")
-        self.lines.delete("1.0", "end")
-        self.lines.insert("1.0", "\n".join(f"{i:>3}" for i in range(1, len(lines) + 1)))
-        self.lines.configure(state="disabled")
-        self.sync_lines(self.text.yview()[0], None)
-        for tag in ("keyword", "string", "comment"):
-            self.text.tag_remove(tag, "1.0", "end")
-        for index, line in enumerate(lines, 1):
-            if line.lstrip().startswith("--"):
-                self.text.tag_add("comment", f"{index}.0", f"{index}.end")
-                continue
-            for match in re.finditer(r'"(?:[^"\\]|\\.)*"|\b(?:print|wait)\b', line):
-                tag = "string" if match[0].startswith('"') else "keyword"
-                self.text.tag_add(tag, f"{index}.{match.start()}", f"{index}.{match.end()}")
-
-    def source(self):
-        return self.text.get("1.0", "end-1c")
-
-    def replace(self, source):
-        self.text.delete("1.0", "end")
-        self.text.insert("1.0", source)
-        self.text.edit_reset()
-        self.text.edit_modified(False)
-        if self.refresh_job is not None:
-            self.root.after_cancel(self.refresh_job)
-        self.refresh()
-
-    def reveal_view(self, view, previous):
-        if self.view_motion is not None:
-            self.root.after_cancel(self.view_motion)
-            self.view_motion = None
-        previous.place_forget()
-        if not self.window.winfo_ismapped():
-            view.place(relwidth=1, relheight=1)
-            return
-
-        def slide(step):
-            offset = round(14 * (1 - step / 7) ** 3)
-            view.place(x=offset, relwidth=1, width=-offset, relheight=1)
-            self.view_motion = self.root.after(16, slide, step + 1) if step < 7 else None
+        def slide(frame):
+            offset = round(12 * (1 - frame / 7) ** 3)
+            page.place(x=offset, width=-offset, relwidth=1, relheight=1)
+            self.transition = self.root.after(16, slide, frame + 1) if frame < 7 else None
 
         slide(0)
+        if searching:
+            self.query_entry.focus_set()
+        else:
+            self.settings_tab.focus_set()
 
-    def show_editor(self):
-        self.editor_tab.state(active=True)
-        self.library_tab.state(active=False)
-        self.reveal_view(self.editor, self.library)
-        self.text.focus_set()
+    def build_lookup(self):
+        content = tk.Frame(self.lookup, bg="#111111")
+        content.pack(fill="both", expand=True, padx=34, pady=(42, 20))
+        tk.Label(content, text="OSINT", fg="white", bg="#111111",
+                 font=("Segoe UI Semibold", 28)).pack(anchor="w")
+        tk.Label(content, text="Inspect public DNS or check identifier formats locally.",
+                 fg="#aaa", bg="#111111", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 20))
+        bar = tk.Frame(content, bg=BG, highlightthickness=1, highlightbackground="#3a3a3a")
+        bar.pack(fill="x")
+        self.query = tk.StringVar()
+        self.query_entry = tk.Entry(bar, textvariable=self.query, bg=BG, fg="white",
+                                    insertbackground="white", relief="flat", font=("Segoe UI", 13))
+        self.query_entry.pack(side="left", fill="both", expand=True, padx=13)
+        placeholder = tk.Label(self.query_entry, bg=BG, font=("Segoe UI", 12), cursor="xterm")
+        placeholder.bind("<Button-1>", lambda _: self.query_entry.focus_set())
+        Button(bar, "Search", self.search_lookup, primary=True).pack(side="right", padx=5, pady=5)
+        self.query_entry.bind("<Return>", lambda _: self.search_lookup())
+        self.lookup_result = tk.Label(content, text="", fg="#ddd", bg="#111111",
+                                      justify="left", anchor="nw", font=("Segoe UI", 11), wraplength=570)
+        self.lookup_result.pack(fill="x", pady=18)
+        examples = ("Phone number", "Email", "Name", "Discord ID")
+        self.placeholder_job = None
 
-    def show_library(self):
-        self.editor_tab.state(active=False)
-        self.library_tab.state(active=True)
-        self.reveal_view(self.library, self.editor)
-        for child in self.library.winfo_children():
-            child.destroy()
-        top = tk.Frame(self.library, bg=BG)
-        top.pack(fill="x", padx=20, pady=(18, 12))
-        tk.Label(top, text="Saved", bg=BG, fg="white",
-                 font=("Segoe UI", 16, "bold")).pack(side="left")
-        Button(top, "Import", self.load).pack(side="right")
-        panel = tk.Canvas(self.library, bg="#111111", highlightthickness=1,
-                          highlightbackground="#292929")
-        panel.pack(fill="both", expand=True, padx=20, pady=(0, 16))
-        rows = tk.Frame(panel, bg="#111111")
-        anchor = panel.create_window(0, 0, anchor="nw", window=rows)
-        panel.bind("<Configure>", lambda event: panel.itemconfigure(anchor, width=event.width - 2))
-        rows.bind("<Configure>", lambda _: panel.configure(scrollregion=panel.bbox(anchor)))
+        def animate(frame=0):
+            self.placeholder_job = None
+            if self.query.get() or self.page is not self.lookup:
+                return
+            phase = frame % 40
+            shade = 66 + min(phase, 39-phase, 6) * 15
+            placeholder.configure(text=examples[(frame // 40) % len(examples)],
+                                  fg=f"#{shade:02x}{shade:02x}{shade:02x}")
+            placeholder.place(x=0, rely=.5, anchor="w")
+            self.placeholder_job = self.root.after(55, animate, frame+1)
 
-        def scroll(event):
-            panel.yview_scroll(-int(event.delta / 120), "units")
+        def refresh_placeholder(*_):
+            if self.placeholder_job is not None:
+                self.root.after_cancel(self.placeholder_job)
+                self.placeholder_job = None
+            placeholder.place_forget()
+            animate()
 
-        panel.bind("<MouseWheel>", scroll)
-        rows.bind("<MouseWheel>", scroll)
-        if not self.scripts:
-            tk.Label(rows, text="Save a script from the editor or import one from GitHub.",
-                     bg="#111111", fg="#aaa", font=("Segoe UI", 10)).pack(anchor="w", padx=14, pady=18)
-        for name in sorted(self.scripts, key=lambda name: (not self.scripts[name]["favorite"], name.casefold())):
-            row = tk.Frame(rows, bg="#1b1b1b")
-            row.pack(fill="x", padx=8, pady=(6, 0))
-            title = tk.Label(row, text=name, bg="#1b1b1b", fg="#eee", anchor="w",
-                             font=("Segoe UI Semibold", 10))
-            title.pack(side="left", fill="x", expand=True, padx=12)
-            title.bind("<Double-Button-1>", lambda _, name=name: self.open_script(name))
-            opened = Button(row, "Open", lambda name=name: self.open_script(name))
-            opened.pack(side="right", padx=(4, 6), pady=4)
-            star = Button(row, "★" if self.scripts[name]["favorite"] else "☆",
-                          lambda name=name: self.favorite(name))
-            star.configure(width=38)
-            star.pack(side="right", pady=4)
-            for widget in (row, title, opened, star):
-                widget.bind("<MouseWheel>", scroll)
+        self.refresh_placeholder = refresh_placeholder
+        self.query.trace_add("write", refresh_placeholder)
+        refresh_placeholder()
 
-    def persist(self, scripts):
-        temporary = STORE.with_suffix(".tmp")
-        try:
-            temporary.write_text(json.dumps(scripts, ensure_ascii=False), encoding="utf-8")
-            temporary.replace(STORE)
-        except OSError as error:
-            messagebox.showerror("Saved scripts", str(error))
-            return False
-        self.scripts = scripts
-        return True
-
-    def favorite(self, name):
-        entry = self.scripts[name]
-        if self.persist({**self.scripts, name: {**entry, "favorite": not entry["favorite"]}}):
-            self.show_library()
-
-    def open_script(self, name):
-        self.replace(self.scripts[name]["source"])
-        self.show_editor()
-
-    def save(self):
-        name = simpledialog.askstring("Save script", "Script name", parent=self.root)
-        if not name or not name.strip():
-            return
-        name = name.strip()
-        existing = self.scripts.get(name)
-        if existing and not messagebox.askyesno("Save script", f"Replace {name}?"):
-            return
-        self.persist({**self.scripts, name: {"source": self.source(),
-                                            "favorite": existing["favorite"] if existing else False}})
-
-    def load(self):
-        value = simpledialog.askstring("Import from GitHub", "GitHub Raw URL or loadstring command", parent=self.root)
+    def search_lookup(self):
+        value = self.query.get().strip()
         if not value:
+            self.lookup_result.configure(text="Enter a domain or identifier.")
             return
-        self.import_script(value)
-
-    def import_script(self, value):
-        if getattr(self, "import_pending", False):
-            return
-        self.import_pending = True
-        results = SimpleQueue()
-
-        def download():
-            try:
-                results.put((import_raw(value), None))
-            except Exception as error:
-                results.put((None, str(error)))
-
-        def receive():
-            try:
-                source, error = results.get_nowait()
-            except Empty:
-                self.root.after(50, receive)
-                return
-            self.import_pending = False
-            if error is not None:
-                messagebox.showerror("Import failed", error, parent=self.root)
-            else:
-                self.replace(source)
-                self.show_editor()
-
-        Thread(target=download, daemon=True).start()
-        self.root.after(50, receive)
-
-    def run(self):
-        source = self.source()
-        if source.strip().startswith("loadstring("):
-            self.import_script(source.strip())
-            return
-        existing = getattr(self, "run_console", None)
-        if existing is not None and existing.winfo_exists():
-            existing.lift()
-            existing.focus_set()
-            return
-        console = tk.Toplevel(self.root)
-        self.run_console = console
-        console.title("voidclient · Run")
-        console.geometry(f"520x245+{self.root.winfo_x() + 80}+{self.root.winfo_y() + 90}")
-        console.overrideredirect(True)
-        console.configure(bg=BG)
-        console.transient(self.root)
-        frame = tk.Frame(console, bg=BG, highlightthickness=1, highlightbackground="#343434")
-        frame.pack(fill="both", expand=True)
-        header = tk.Frame(frame, bg=BG, height=44)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        title = tk.Label(header, text="voidclient  /  Output", bg=BG, fg="white",
-                         font=("Segoe UI", 10, "bold"))
-        title.pack(side="left", padx=18)
-        tk.Frame(frame, bg="#343434", height=1).pack(fill="x")
-        footer = tk.Frame(frame, bg=BG)
-        footer.pack(side="bottom", fill="x", padx=5, pady=5)
-        output = tk.Text(frame, bg=BG, fg="#ddd", bd=0, padx=17, pady=12,
-                         font=("Consolas", 10), state="disabled", wrap="word")
-        timer = None
-        console_lines = 0
-
-        def write(line):
-            nonlocal console_lines
-            console_lines += 1
-            if console_lines > 251:
-                return
-            if console_lines == 251:
-                line = "[Output limit reached]"
-            output.configure(state="normal")
-            output.insert("end", line + "\n")
-            output.see("end")
-            output.configure(state="disabled")
-
-        def close(_event=None):
-            if timer is not None:
-                console.after_cancel(timer)
-            console.destroy()
-
-        Button(header, "×", close).pack(side="right", padx=(0, 3))
-
-        def begin_drag(event):
-            console.drag_offset = (event.x_root - console.winfo_x(), event.y_root - console.winfo_y())
-
-        def drag(event):
-            x, y = console.drag_offset
-            console.geometry(f"+{event.x_root - x}+{event.y_root - y}")
-
-        for target in (header, title):
-            target.bind("<ButtonPress-1>", begin_drag)
-            target.bind("<B1-Motion>", drag)
-
-        console.protocol("WM_DELETE_WINDOW", close)
-        console.bind("<Alt-F4>", close)
-        console.bind("<Escape>", close)
-        console.update_idletasks()
-        console.focus_set()
-
-        def play_sound():
-            try:
-                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-            except RuntimeError as error:
-                write(f"Sound unavailable: {error}")
-
-        sound_button = Button(footer, "Test Sound", play_sound)
-        output.pack(fill="both", expand=True)
-
-        def advance():
-            nonlocal timer
-            timer = None
-            for _ in range(32):
-                try:
-                    step = next(steps)
-                except StopIteration:
-                    write("[Finished]")
-                    return
-                if step is None:
-                    sound_button.pack(side="left")
-                    continue
-                if isinstance(step, int):
-                    if step:
-                        timer = console.after(step, advance)
-                        return
-                    continue
-                write(step)
-            timer = console.after(10, advance)
-
         try:
-            steps = iter(parse(source))
-        except ValueError as error:
-            write(str(error))
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            address = None
+        if address is not None:
+            self.lookup_request = None
+            token = os.environ.get("VOIDCLIENT_IPINFO_TOKEN", "").strip()
+            if not address.is_global or address.is_multicast or "%" in value:
+                self.lookup_result.configure(text="Enter a public unicast IP address.")
+            elif not token:
+                self.lookup_result.configure(text="Set VOIDCLIENT_IPINFO_TOKEN to enable IPinfo lookups.")
+            else:
+                self.lookup_result.configure(text="Looking up IP address…")
+                self.start_lookup(value, lambda: ipinfo_lookup(address, token), "IPinfo lookup failed. Check your token and connection.")
             return
-        advance()
+        if re.fullmatch(r"[0-9]{17,20}", value) and 0 < int(value) < 2**64:
+            from datetime import datetime, timezone
+            created = datetime.fromtimestamp(((int(value) >> 22) + 1420070400000) / 1000, timezone.utc)
+            result = f"Discord ID format · Embedded timestamp {created:%Y-%m-%d %H:%M UTC}"
+        elif re.fullmatch(r"[+][1-9][0-9]{6,14}", re.sub(r"[ ()-]", "", value)):
+            result = "International phone number format · Ownership unverified."
+        elif re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            result = f"Email format · Domain: {value.rsplit('@', 1)[1]}"
+        elif re.fullmatch(r"(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}", value):
+            self.lookup_result.configure(text=f"Resolving {value}…")
+            token = os.environ.get("VOIDCLIENT_VIRUSTOTAL_KEY", "").strip()
+            self.start_lookup(value, lambda: domain_lookup(value, token), "Domain lookup failed.")
+            return
+        else:
+            result = "Name entered. This app checks identifier formats and public domain DNS."
+        self.lookup_request = None
+        self.lookup_result.configure(text=result)
+
+    def start_lookup(self, value, action, failure):
+        results = SimpleQueue()
+        request = object()
+        self.lookup_request = request
+
+        def worker():
+            try:
+                results.put(action())
+            except (OSError, ValueError, AttributeError):
+                results.put(failure)
+
+        def show_result():
+            if self.lookup_request is not request or self.query.get().strip() != value:
+                return
+            try:
+                self.lookup_result.configure(text=results.get_nowait())
+            except Empty:
+                self.root.after(75, show_result)
+
+        Thread(target=worker, daemon=True).start()
+        self.root.after(75, show_result)
 
 
 if __name__ == "__main__":
