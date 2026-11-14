@@ -146,7 +146,7 @@ def rounded(canvas, x, y, right, bottom, r, fill, tags=()):
     canvas.create_polygon(x+r,y, right-r,y, right,y, right,y+r, right,bottom-r,
                           right,bottom, right-r,bottom, x+r,bottom, x,bottom, x,bottom-r,
                           x,y+r, x,y, fill=fill, smooth=True, splinesteps=16, tags=tags)
-BUILD = 11
+BUILD = 12
 REPOSITORY = "void3uu/voidclient"
 
 
@@ -591,14 +591,49 @@ class VoidClient:
 
     def build_companion(self):
         panel = tk.Frame(self.roblox, bg="#111111")
-        panel.pack(fill="both", expand=True, padx=12, pady=12)
-        footer = tk.Frame(panel, bg=BG)
-        footer.pack(side="bottom", fill="x", pady=(6, 0))
-        Button(footer, "Run", self.run, primary=True).pack(side="left")
-        self.text = tk.Text(panel, bg="#111111", fg="#dedede", insertbackground="white",
-                            relief="flat", font=("Consolas", 11), undo=True, padx=12, pady=12)
+        panel.pack(fill="both", expand=True, padx=20, pady=17)
+        tk.Label(panel, text="Script Workspace", bg="#111111", fg="white",
+                 font=("Segoe UI Semibold", 20)).pack(anchor="w")
+        shell = tk.Frame(panel, bg="#141517", highlightbackground="#303237", highlightthickness=1)
+        shell.pack(fill="both", expand=True, pady=(13, 10))
+        tab = tk.Frame(shell, bg="#1e2024")
+        tab.pack(fill="x")
+        tk.Label(tab, text="script.lua", bg="#1e2024", fg="#dedfe3",
+                 font=("Segoe UI Semibold", 10)).pack(side="left", padx=13, pady=7)
+        tk.Label(tab, text="Local runner", bg="#1e2024", fg="#aeb4c0").pack(side="right", padx=12)
+        gutter = tk.Canvas(shell, bg="#18191c", width=42, highlightthickness=0)
+        gutter.pack(side="left", fill="y")
+        self.text = tk.Text(shell, bg="#141517", fg="#c8dafa", insertbackground="white",
+                            selectbackground="#284065", relief="flat", font=("Consolas", 11),
+                            undo=True, padx=12, pady=10, wrap="none")
         self.text.pack(fill="both", expand=True)
+
+        def draw_lines(*_):
+            gutter.delete("all")
+            index = self.text.index("@0,0")
+            while info := self.text.dlineinfo(index):
+                gutter.create_text(33, info[1] + info[3]/2, anchor="e",
+                                   text=index.split(".")[0], fill="#8c919e", font=("Consolas", 10))
+                following = self.text.index(f"{index}+1line linestart")
+                if self.text.compare(following, "<=", index):
+                    break
+                index = following
+
+        def edited(_):
+            if self.text.edit_modified():
+                self.text.edit_modified(False)
+                draw_lines()
+
+        self.text.configure(yscrollcommand=draw_lines)
+        self.text.bind("<Configure>", draw_lines)
+        self.text.bind("<<Modified>>", edited)
+        self.text.bind("<Control-Return>", lambda _: (self.run(), "break")[1])
         self.text.insert("1.0", 'print("Hello from VoidClient")')
+        footer = tk.Frame(panel, bg="#111111")
+        footer.pack(fill="x")
+        Button(footer, "Execute", self.run, primary=True).pack(side="left")
+        Button(footer, "Link Roblox", self.attach_from_editor).pack(side="left", padx=8)
+        tk.Label(footer, text="Ctrl+Enter to execute", bg="#111111", fg="#a0a0a0").pack(side="right")
         self.attach_job = None
         Button(self.attach, "Attach Roblox", self.attach_roblox, primary=True).pack(anchor="w", padx=26, pady=20)
         self.attach_status = tk.Label(self.attach, bg="#111111", fg="#ddd", text="Detached")
@@ -609,6 +644,10 @@ class VoidClient:
         self.profile_status = tk.Label(self.attach, bg="#111111", fg="#ddd")
         self.profile_status.pack(anchor="w", padx=26)
         self.next_profile_check = 0
+
+    def attach_from_editor(self):
+        self.show_page(self.attach)
+        self.attach_roblox()
 
     def attach_roblox(self):
         if self.attach_job is None:
