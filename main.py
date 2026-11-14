@@ -1,21 +1,262 @@
 import json
-import os
-import base64
+import winsound
 import ctypes
 from ctypes import wintypes
-from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 from queue import Empty, SimpleQueue
 from threading import Thread
 import re
 import tkinter as tk
 import subprocess
 import sys
-from updates import check_update, install_update
 from pathlib import Path
 from tkinter import messagebox
 
-from chrome import BG, Button
+
+
+import base64
+import hashlib
+import os
+import tempfile
+from time import time_ns
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+
+BG = "#151515"
+
+
+class Button(tk.Canvas):
+    def __init__(self, parent, label, command, primary=False):
+        self.label, self.command, self.primary = label, command, primary
+        self.hover = self.pressed = self.active = False
+        self.last_draw = None
+        self.fill = None
+        self.animation = None
+        icon = label in ("×", "−", "</>", "☷", "⌕", "⚙")
+        super().__init__(parent, width=38 if icon else max(86, len(label) * 8 + 22), height=39, bg=BG,
+                         highlightthickness=0, takefocus=True, cursor="hand2")
+        for event, callback in (
+            ("<Configure>", self.draw), ("<FocusIn>", self.draw), ("<FocusOut>", self.draw),
+            ("<Enter>", lambda _: self.state(hover=True)),
+            ("<Leave>", lambda _: self.state(hover=False)),
+            ("<ButtonPress-1>", lambda _: self.press()),
+            ("<ButtonRelease-1>", self.release),
+            ("<Return>", self.activate), ("<space>", self.activate),
+            ("<Destroy>", self.cancel_animation),
+        ):
+            self.bind(event, callback)
+
+    def state(self, **changes):
+        for key, value in changes.items():
+            setattr(self, key, value)
+        self.draw()
+
+    def activate(self, _event=None):
+        if str(self.cget("state")) != "disabled":
+            self.command()
+        return "break"
+
+    def cancel_animation(self, _event=None):
+        if self.animation is not None:
+            self.after_cancel(self.animation)
+            self.animation = None
+
+    def fade(self, start, end, step=1):
+        weight = 1 - (1 - step / 6) ** 2
+        self.fill = "#" + "".join(f"{round(a + (b - a) * weight):02x}" for a, b in zip(start, end))
+        self.itemconfigure("surface", fill=self.fill)
+        self.animation = self.after(15, self.fade, start, end, step + 1) if step < 6 else None
+
+    def press(self):
+        self.focus_set()
+        self.state(pressed=True)
+
+    def release(self, event):
+        invoke = self.pressed and 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height()
+        self.state(pressed=False)
+        if invoke:
+            self.activate()
+
+    def draw(self, _event=None):
+        w, h = self.winfo_width(), self.winfo_height()
+        focused = self.focus_get() is self
+        appearance = (w, h, focused, self.active, self.hover, self.pressed)
+        if appearance == self.last_draw or min(w, h) < 3:
+            return
+        self.last_draw = appearance
+        self.delete("all")
+        x, y = w / 2, h / 2
+        label = self.label
+        icon = label in ("×", "−", "</>", "☷", "⌕", "⚙")
+        fill = "#c9c9c9" if self.pressed else "#eeeeee" if self.hover else "#ffffff"
+        ink = "#131313" if self.primary else "#888888"
+        if self.hover or self.active or not icon:
+            ink = "#f0f0f0" if not self.primary else ink
+        if not self.primary:
+            fill = "#1b1b1b" if not icon else BG
+            if self.active or self.hover:
+                fill = "#303030" if self.hover else "#242424"
+            if self.pressed:
+                fill = "#333333"
+            if label == "×" and self.hover:
+                fill = "#a52d36"
+        self.cancel_animation()
+        previous = self.fill or fill
+        border = "#a4a4a4" if focused else "#373737" if self.active or not icon else BG
+        rounded(self, 0, 0, w, h, 8, border)
+        rounded(self, 1, 1, w - 1, h - 1, 7, previous, tags="surface")
+        if previous != fill:
+            channels = lambda color: tuple(value // 257 for value in self.winfo_rgb(color))
+            self.fade(channels(previous), channels(fill))
+        else:
+            self.fill = fill
+        if self.active and icon:
+            self.create_line(3, y - 5, 3, y + 5, fill="#d6d6d6", width=2, capstyle="round")
+
+        def line(*coords):
+            points = [value + (x if i % 2 == 0 else y) for i, value in enumerate(coords)]
+            self.create_line(*points, fill=ink, width=2, capstyle="round", joinstyle="round")
+
+        if label == "×":
+            line(-5, -5, 5, 5)
+            line(-5, 5, 5, -5)
+        elif label == "−":
+            line(-6, 0, 6, 0)
+        elif label == "⚙":
+            self.create_text(x, y, text=label, fill=ink, font=("Segoe UI Symbol", 15))
+        elif label == "⌕":
+            self.create_oval(x-8, y-8, x+3, y+3, outline=ink, width=2)
+            line(2, 2, 8, 8)
+        elif label == "</>":
+            line(-5, -4, -9, 0, -5, 4)
+            line(5, -4, 9, 0, 5, 4)
+            line(2, -6, -2, 6)
+        elif label == "☷":
+            for dy in (-5, 0, 5):
+                line(-8, dy, -7, dy)
+                line(-3, dy, 8, dy)
+        elif label == "Run":
+            self.create_polygon(x - 24, y - 6, x - 24, y + 6, x - 13, y,
+                                fill="", outline=ink, width=1.5)
+            self.create_text(x + 11, y, text="Run", fill=ink, font=("Segoe UI Semibold", 10))
+        else:
+            self.create_text(x, y, text=label, fill=ink, font=("Segoe UI Semibold", 10))
+
+
+def rounded(canvas, x, y, right, bottom, r, fill, tags=()):
+    canvas.create_polygon(x+r,y, right-r,y, right,y, right,y+r, right,bottom-r,
+                          right,bottom, right-r,bottom, x+r,bottom, x,bottom, x,bottom-r,
+                          x,y+r, x,y, fill=fill, smooth=True, splinesteps=16, tags=tags)
+BUILD = 11
+REPOSITORY = "void3uu/voidclient"
+
+
+def check_update():
+    if getattr(sys, "frozen", False):
+        return packaged_release()
+    return newer_source()
+
+
+def newer_source():
+    url = f"https://raw.githubusercontent.com/{REPOSITORY}/main/main.py?check={time_ns()}"
+    data = fetch(url)
+    versions = re.findall(rb"^BUILD = ([0-9]{1,9})\r?$", data, re.MULTILINE)
+    if len(versions) == 1 and int(versions[0]) > BUILD:
+        return data
+    return None
+
+
+def install_update():
+    if getattr(sys, "frozen", False):
+        install_packaged_update()
+        return
+    data = newer_source()
+    if not data:
+        raise ValueError("A newer source build is unavailable.")
+    target = Path(__file__).resolve()
+    compile(data, str(target), "exec")
+    with tempfile.TemporaryDirectory(dir=target.parent) as directory:
+        staged = Path(directory) / target.name
+        staged.write_bytes(data)
+        staged.replace(target)
+
+
+def packaged_release():
+    request = Request(f"https://api.github.com/repos/{REPOSITORY}/releases/latest",
+                      headers={"User-Agent": "VoidClient", "Cache-Control": "no-cache"})
+    with urlopen(request, timeout=8) as response:
+        release = json.loads(response.read(262145))
+    tag = re.fullmatch(r"voidclient-(\d{1,9})", release.get("tag_name", ""))
+    if not tag or int(tag[1]) <= BUILD:
+        return None
+    for asset in release.get("assets", []):
+        digest = asset.get("digest") or ""
+        size = asset.get("size", 0)
+        if (asset.get("name") == "voidclient.exe"
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                and 0 < size <= 80 * 1024 * 1024):
+            url = f"https://github.com/{REPOSITORY}/releases/download/{tag[0]}/voidclient.exe"
+            return url, digest[7:], size
+    return None
+
+
+def install_packaged_update():
+    release = packaged_release()
+    if not release:
+        raise ValueError("No newer packaged build is available.")
+    url, digest, size = release
+    target = Path(sys.executable).resolve()
+    fd, staged = tempfile.mkstemp(prefix="voidclient-update-", suffix=".exe", dir=target.parent)
+    try:
+        checksum = hashlib.sha256()
+        with os.fdopen(fd, "wb") as output, urlopen(url, timeout=15) as response:
+            remaining = size
+            while remaining:
+                chunk = response.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                output.write(chunk)
+                checksum.update(chunk)
+                remaining -= len(chunk)
+            if remaining or response.read(1) or checksum.hexdigest() != digest:
+                raise ValueError("The update download did not match the release checksum.")
+
+        environment = dict(os.environ, VOIDCLIENT_TARGET=str(target), VOIDCLIENT_STAGE=staged,
+                           PYINSTALLER_RESET_ENVIRONMENT="1")
+        shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        subprocess.Popen(
+            [str(shell), "-NoProfile", "-NonInteractive", "-Command", """
+$target = $env:VOIDCLIENT_TARGET
+$stage = $env:VOIDCLIENT_STAGE
+$backup = $stage + '.bak'
+$replaced = $false
+for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    try {
+        [IO.File]::Replace($stage, $target, $backup)
+        $replaced = $true
+        break
+    } catch [IO.IOException] {
+        Start-Sleep -Milliseconds 250
+    }
+}
+if ($replaced) {
+    try {
+        Start-Process -FilePath $target -ErrorAction Stop
+        [IO.File]::Delete($backup)
+    } catch {
+        if ([IO.File]::Exists($backup)) {
+            [IO.File]::Replace($backup, $target, $null)
+            Start-Process -FilePath $target
+        }
+    }
+} else {
+    [IO.File]::Delete($stage)
+}
+"""], env=environment, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        Path(staged).unlink(missing_ok=True)
+        raise
+
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args):
@@ -30,37 +271,6 @@ def fetch(url, payload=None):
     if len(data) > 1048576:
         raise ValueError("Roblox response exceeded the size limit.")
     return data
-
-
-def place_id(value):
-    if re.fullmatch(r"[1-9][0-9]{0,18}", value):
-        return value
-    url = urlsplit(value)
-    match = re.match(r"/games/([1-9][0-9]{0,18})(?:/|$)", url.path)
-    if url.scheme == "https" and url.netloc.lower() in ("roblox.com", "www.roblox.com") and match:
-        return match[1]
-    raise ValueError("Enter a Roblox experience URL or place ID.")
-
-
-def roblox_window():
-    user32 = ctypes.windll.user32
-    foreground = user32.GetForegroundWindow
-    foreground.restype = wintypes.HWND
-    user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-    user32.IsWindowVisible.argtypes = (wintypes.HWND,)
-    candidates = []
-    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-    @callback_type
-    def visit(hwnd, _):
-        title = ctypes.create_unicode_buffer(128)
-        user32.GetWindowTextW(hwnd, title, len(title))
-        if user32.IsWindowVisible(hwnd) and title.value == "Roblox":
-            candidates.append(hwnd)
-        return True
-
-    user32.EnumWindows(visit, 0)
-    return (candidates[0] if candidates else None), foreground()
 
 
 def player_activity():
@@ -86,6 +296,57 @@ def player_activity():
             elif "Time to disconnect replication data" in line or "leaveUGCGameInternal" in line:
                 place = job = None
     return user, place, job
+
+
+
+LIMIT = 16384
+
+def parse(source):
+    if len(source.encode()) > LIMIT:
+        raise ValueError("Scripts must be 16 KB or smaller.")
+    steps = []
+    total = 0
+    for number, line in enumerate(source.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("--"):
+            continue
+        if line == "sound_button()":
+            steps.append(None)
+            continue
+        match = re.fullmatch(r'print\(("(?:[^"\\]|\\.)*")\)', line)
+        if match:
+            steps.append(json.loads(match[1]))
+            continue
+        match = re.fullmatch(r"wait\((\d{1,2}(?:\.\d{1,3})?)\)", line)
+        if match:
+            delay = round(float(match[1]) * 1000)
+            total += delay
+            if total <= 30000:
+                steps.append(delay)
+                continue
+        raise ValueError(f'Line {number}: use print("text"), sound_button(), or wait(seconds), with at most 30 seconds of total waits.')
+    return steps
+
+
+def roblox_window():
+    user32 = ctypes.windll.user32
+    foreground = user32.GetForegroundWindow
+    foreground.restype = wintypes.HWND
+    user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+    candidates = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @callback_type
+    def visit(hwnd, _):
+        title = ctypes.create_unicode_buffer(128)
+        user32.GetWindowTextW(hwnd, title, len(title))
+        if user32.IsWindowVisible(hwnd) and title.value == "Roblox":
+            candidates.append(hwnd)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return (candidates[0] if candidates else None), foreground()
 
 
 class VoidClient:
@@ -143,7 +404,7 @@ class VoidClient:
         rail = tk.Frame(body, bg=BG, width=132)
         rail.pack(side="left", fill="y")
         rail.pack_propagate(False)
-        self.roblox_tab = Button(rail, "Roblox Stuff", lambda: self.show_page(self.roblox))
+        self.roblox_tab = Button(rail, "Executor", lambda: self.show_page(self.roblox))
         self.roblox_tab.pack(pady=(11, 5))
         self.attach_tab = Button(rail, "Attach Stuff", lambda: self.show_page(self.attach))
         self.attach_tab.pack(side="bottom", pady=10)
@@ -215,7 +476,7 @@ class VoidClient:
             if not url:
                 screen.destroy()
                 self.window.pack(fill="both", expand=True)
-                self.server_list.focus_set()
+                self.text.focus_set()
                 return
             def install():
                 self.installing = True
@@ -324,115 +585,87 @@ class VoidClient:
 
         slide(0)
         if searching:
-            self.server_list.focus_set()
+            self.text.focus_set()
         else:
             self.attach_tab.focus_set()
 
     def build_companion(self):
-        content = tk.Frame(self.roblox, bg="#111111")
-        content.pack(fill="both", expand=True, padx=26, pady=20)
-        tk.Label(content, text="Roblox Stuff", bg="#111111", fg="white",
-                 font=("Segoe UI Semibold", 23)).pack(anchor="w")
-        def field(parent, label, button, action):
-            tk.Label(parent, text=label, bg="#111111", fg="#aaa").pack(anchor="w", pady=(5, 2))
-            row = tk.Frame(parent, bg="#111111")
-            row.pack(fill="x")
-            entry = tk.Entry(row, bg="#222222", fg="white", insertbackground="white",
-                             relief="flat", font=("Segoe UI", 11))
-            entry.pack(side="left", fill="both", expand=True, padx=(0, 8))
-            entry.bind("<Return>", lambda _: action())
-            Button(row, button, action, primary=True).pack(side="right")
-            return entry
-
-        Button(content, "Server Hop", self.server_hop, primary=True).pack(anchor="w", pady=8)
-        self.server_list = tk.Listbox(content, height=4, bg="#1b1b1b", fg="white",
-                                      selectbackground="#383838", relief="flat", exportselection=False)
-        self.server_list.pack(fill="both", expand=True, pady=8)
-        footer = tk.Frame(content, bg="#111111")
-        footer.pack(fill="x")
-        self.server_status = tk.Label(footer, bg="#111111", fg="#aaa", text="")
-        self.server_status.pack(side="left")
-        Button(footer, "Join Selected", self.join_server).pack(side="right")
-        self.server_list.bind("<Double-Button-1>", lambda _: self.join_server())
-        self.servers = []
-        self.attached = tk.BooleanVar()
-        tk.Label(self.attach, text="Attach Stuff", bg="#111111", fg="white",
-                 font=("Segoe UI Semibold", 23)).pack(anchor="w", padx=26, pady=(22, 12))
-        attach_form = tk.Frame(self.attach, bg="#111111")
-        attach_form.pack(fill="x", padx=26)
-        Button(attach_form, "Attach Roblox", self.attach_roblox, primary=True).pack(anchor="w", pady=8)
-        profile = tk.Frame(self.attach, bg="#111111")
-        profile.pack(fill="x", padx=26, pady=8)
-        self.avatar = tk.Label(profile, bg="#111111")
-        self.avatar.pack(side="left", padx=(0, 10))
-        self.profile_status = tk.Label(profile, text="Load your public profile", bg="#111111", fg="#ddd")
-        self.profile_status.pack(side="left")
-
-        self.attach_status = tk.Label(self.attach, bg="#111111", fg="#aaa", text="Detached")
-        self.attach_status.pack(anchor="w", padx=26, pady=12)
+        panel = tk.Frame(self.roblox, bg="#111111")
+        panel.pack(fill="both", expand=True, padx=12, pady=12)
+        footer = tk.Frame(panel, bg=BG)
+        footer.pack(side="bottom", fill="x", pady=(6, 0))
+        Button(footer, "Run", self.run, primary=True).pack(side="left")
+        self.text = tk.Text(panel, bg="#111111", fg="#dedede", insertbackground="white",
+                            relief="flat", font=("Consolas", 11), undo=True, padx=12, pady=12)
+        self.text.pack(fill="both", expand=True)
+        self.text.insert("1.0", 'print("Hello from VoidClient")')
         self.attach_job = None
+        Button(self.attach, "Attach Roblox", self.attach_roblox, primary=True).pack(anchor="w", padx=26, pady=20)
+        self.attach_status = tk.Label(self.attach, bg="#111111", fg="#ddd", text="Detached")
+        self.attach_status.pack(anchor="w", padx=26)
         self.profile_id = None
-        self.current_game = None
-        self.presence_status = tk.Label(self.roblox, bg="#111111", fg="#aaa")
-        self.presence_status.pack(anchor="w", padx=26, pady=(0, 8))
-        self.game_window = None
-
-    def detect_activity(self):
-        if not self.game_window:
-            self.current_game = None
-            self.presence_status.configure(text="Open Roblox Player and join a game.")
-            return
-
-        def done(activity):
-            user, place, job = activity
-            if not self.game_window:
-                return
-            self.current_game = place
-            self.current_server = (place, job)
-            self.presence_status.configure(text=f"Current place: {place}" if place else "Waiting for a Roblox game…")
-            if user and user != self.profile_id:
-                self.load_profile(user)
-            elif not user and self.profile_id is None:
-                self.profile_status.configure(text="Account unavailable. Join a game in Roblox.")
-
-        self.background(self.presence_status, player_activity, done)
+        self.avatar = tk.Label(self.attach, bg="#111111")
+        self.avatar.pack(anchor="w", padx=26, pady=(12, 0))
+        self.profile_status = tk.Label(self.attach, bg="#111111", fg="#ddd")
+        self.profile_status.pack(anchor="w", padx=26)
+        self.next_profile_check = 0
 
     def attach_roblox(self):
-        self.attached.set(True)
-        self.track_roblox()
-        self.detect_activity()
-
-    def server_hop(self):
-        self.load_servers(hop=True)
+        if self.attach_job is None:
+            self.track_roblox()
 
     def track_roblox(self):
-        if self.attach_job is not None:
-            self.root.after_cancel(self.attach_job)
-            self.attach_job = None
-        if not self.attached.get():
-            self.root.attributes("-topmost", False)
-            self.attach_status.configure(text="Detached")
-            return
         game, foreground = roblox_window()
-        self.game_window = game
-        self.root.attributes("-topmost", bool(game and (
-            game == foreground or self.root.focus_displayof() is not None)))
-        self.attach_status.configure(text="Roblox window linked" if game else "Waiting for Roblox…")
+        self.root.attributes("-topmost", bool(game and game == foreground))
+        self.attach_status.configure(text="Roblox Player linked" if game else "Waiting for Roblox Player…")
         if not game:
-            self.current_game = None
-        elif self.attached.get():
-            from time import monotonic
-            now = monotonic()
-            if now >= getattr(self, "next_activity_check", 0):
-                self.next_activity_check = now + 4
-                self.detect_activity()
+            self.profile_id = None
+            self.avatar.configure(image="")
+            self.profile_status.configure(text="")
+        elif time_ns() >= self.next_profile_check:
+            self.next_profile_check = time_ns() + 5_000_000_000
+            self.background(self.profile_status, self.linked_profile, self.show_profile)
         self.attach_job = self.root.after(350, self.track_roblox)
+
+    def linked_profile(self):
+        user, _, _ = player_activity()
+        if user is None or user == self.profile_id:
+            return user, None, None
+        profile = json.loads(fetch(f"https://users.roblox.com/v1/users/{user}"))
+        image = None
+        try:
+            query = urlencode({"userIds": user, "size": "60x60", "format": "Png"})
+            thumbnails = json.loads(fetch(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?{query}"))
+            for item in thumbnails["data"]:
+                url = item.get("imageUrl") or ""
+                parts = urlsplit(url)
+                if parts.scheme == "https" and parts.netloc == "tr.rbxcdn.com":
+                    image = fetch(url)
+                    break
+        except (OSError, ValueError, KeyError):
+            pass
+        return user, profile, image
+
+    def show_profile(self, result):
+        user, profile, image = result
+        if not roblox_window()[0]:
+            return
+        if user is None:
+            self.profile_status.configure(text="Join a game in Roblox to detect your profile.")
+        elif profile:
+            self.profile_id = user
+            self.profile_status.configure(text=f"@{profile['name']}  ·  Linked user ID: {user}")
+            try:
+                self.avatar.image = tk.PhotoImage(data=base64.b64encode(image)) if image else None
+            except tk.TclError:
+                self.avatar.image = None
+            self.avatar.configure(image=self.avatar.image or "")
+
 
     def background(self, status, work, done):
         if getattr(status, "busy", False):
             return
         status.busy = True
-        status.configure(text="Loading…")
         results = SimpleQueue()
 
         def worker():
@@ -456,82 +689,114 @@ class VoidClient:
         Thread(target=worker, daemon=True).start()
         self.root.after(60, poll)
 
-    def load_profile(self, user_id):
-        def work():
-            profile = json.loads(fetch(f"https://users.roblox.com/v1/users/{user_id}"))
-            try:
-                query = urlencode({"userIds": int(profile["id"]), "size": "60x60", "format": "Png"})
-                thumbnails = json.loads(fetch(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?{query}"))
-                for item in thumbnails["data"]:
-                    url = item.get("imageUrl") or ""
-                    parts = urlsplit(url)
-                    if parts.scheme == "https" and re.fullmatch(r"tr\.rbxcdn\.com", parts.netloc):
-                        return profile, fetch(url)
-            except (OSError, ValueError, KeyError):
-                pass
-            return profile, None
+    def source(self):
+        return self.text.get("1.0", "end-1c")
 
-        def done(result):
-            profile, image = result
-            self.profile_id = int(profile["id"])
-            self.avatar.image = None
-            try:
-                if image:
-                    self.avatar.image = tk.PhotoImage(data=base64.b64encode(image), format="png")
-            except tk.TclError:
-                pass
-            self.avatar.configure(image=self.avatar.image or "")
-            self.profile_status.configure(text=f"{profile['displayName']}  ·  @{profile['name']}")
-
-        self.background(self.profile_status, work, done)
-
-    def load_servers(self, hop=False):
-        place = self.current_game
-        if not place:
-            self.server_status.configure(text="Attach Roblox while in a game first.")
+    def run(self):
+        source = self.source()
+        existing = getattr(self, "run_console", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
             return
+        console = tk.Toplevel(self.root)
+        self.run_console = console
+        console.title("voidclient · Run")
+        console.geometry(f"520x245+{self.root.winfo_x() + 80}+{self.root.winfo_y() + 90}")
+        console.overrideredirect(True)
+        console.configure(bg=BG)
+        console.transient(self.root)
+        frame = tk.Frame(console, bg=BG, highlightthickness=1, highlightbackground="#343434")
+        frame.pack(fill="both", expand=True)
+        header = tk.Frame(frame, bg=BG, height=44)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        title = tk.Label(header, text="voidclient  /  Output", bg=BG, fg="white",
+                         font=("Segoe UI", 10, "bold"))
+        title.pack(side="left", padx=18)
+        tk.Frame(frame, bg="#343434", height=1).pack(fill="x")
+        footer = tk.Frame(frame, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=5, pady=5)
+        output = tk.Text(frame, bg=BG, fg="#ddd", bd=0, padx=17, pady=12,
+                         font=("Consolas", 10), state="disabled", wrap="word")
+        timer = None
+        console_lines = 0
 
-        def work():
-            url = f"https://games.roblox.com/v1/games/{place}/servers/Public?excludeFullGames=true&limit=25"
-            return json.loads(fetch(url))["data"]
+        def write(line):
+            nonlocal console_lines
+            console_lines += 1
+            if console_lines > 251:
+                return
+            if console_lines == 251:
+                line = "[Output limit reached]"
+            output.configure(state="normal")
+            output.insert("end", line + "\n")
+            output.see("end")
+            output.configure(state="disabled")
 
-        def done(data):
-            self.servers = [(place, item["id"]) for item in data
-                            if re.fullmatch(r"[a-fA-F0-9-]{36}", item.get("id", ""))
-                            and isinstance(item.get("playing"), int)
-                            and isinstance(item.get("maxPlayers"), int)
-                            and item["playing"] < item["maxPlayers"]]
-            self.server_list.delete(0, "end")
-            for index, (listed_place, server) in enumerate(self.servers, 1):
-                item = next(item for item in data if item["id"] == server)
-                self.server_list.insert("end", f"Server {index}   ·   {item['playing']}/{item['maxPlayers']} players")
-                if (listed_place, server) not in (self.last_server, self.current_server) and not self.server_list.curselection():
-                    self.server_list.selection_set(index - 1)
-            self.server_status.configure(text=f"{len(self.servers)} public servers found")
-            if hop:
-                if self.server_list.curselection():
-                    self.join_server()
-                else:
-                    self.server_status.configure(text="No different public server available.")
+        def close(_event=None):
+            if timer is not None:
+                console.after_cancel(timer)
+            console.destroy()
 
-        self.background(self.server_status, work, done)
+        Button(header, "×", close).pack(side="right", padx=(0, 3))
 
-    def join_server(self):
-        selection = self.server_list.curselection()
-        if not selection:
-            self.server_status.configure(text="Select a public server first.")
-            return
-        place, server = self.servers[selection[0]]
+        def begin_drag(event):
+            console.drag_offset = (event.x_root - console.winfo_x(), event.y_root - console.winfo_y())
+
+        def drag(event):
+            x, y = console.drag_offset
+            console.geometry(f"+{event.x_root - x}+{event.y_root - y}")
+
+        for target in (header, title):
+            target.bind("<ButtonPress-1>", begin_drag)
+            target.bind("<B1-Motion>", drag)
+
+        console.protocol("WM_DELETE_WINDOW", close)
+        console.bind("<Alt-F4>", close)
+        console.bind("<Escape>", close)
+        console.update_idletasks()
+        console.focus_set()
+
+        def play_sound():
+            try:
+                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            except RuntimeError as error:
+                write(f"Sound unavailable: {error}")
+
+        sound_button = Button(footer, "Test Sound", play_sound)
+        output.pack(fill="both", expand=True)
+
+        def advance():
+            nonlocal timer
+            timer = None
+            for _ in range(32):
+                try:
+                    step = next(steps)
+                except StopIteration:
+                    write("[Finished]")
+                    return
+                if step is None:
+                    sound_button.pack(side="left")
+                    continue
+                if isinstance(step, int):
+                    if step:
+                        timer = console.after(step, advance)
+                        return
+                    continue
+                write(step)
+            timer = console.after(10, advance)
+
         try:
-            os.startfile(f"roblox://placeId={place}&gameInstanceId={server}")
-        except OSError:
-            self.server_status.configure(text="Could not open Roblox. Check that Roblox is installed.")
+            steps = iter(parse(source))
+        except ValueError as error:
+            write(str(error))
             return
-        self.last_server = (place, server)
-        self.server_status.configure(text="Join requested in Roblox.")
+        advance()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
     VoidClient(root)
     root.mainloop()
+
