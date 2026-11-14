@@ -9,7 +9,7 @@ import tkinter as tk
 import subprocess
 import sys
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 
 
@@ -146,7 +146,7 @@ def rounded(canvas, x, y, right, bottom, r, fill, tags=()):
     canvas.create_polygon(x+r,y, right-r,y, right,y, right,y+r, right,bottom-r,
                           right,bottom, right-r,bottom, x+r,bottom, x,bottom, x,bottom-r,
                           x,y+r, x,y, fill=fill, smooth=True, splinesteps=16, tags=tags)
-BUILD = 12
+BUILD = 13
 REPOSITORY = "void3uu/voidclient"
 
 
@@ -592,14 +592,15 @@ class VoidClient:
     def build_companion(self):
         panel = tk.Frame(self.roblox, bg="#111111")
         panel.pack(fill="both", expand=True, padx=20, pady=17)
-        tk.Label(panel, text="Script Workspace", bg="#111111", fg="white",
+        tk.Label(panel, text="Workspace", bg="#111111", fg="white",
                  font=("Segoe UI Semibold", 20)).pack(anchor="w")
         shell = tk.Frame(panel, bg="#141517", highlightbackground="#303237", highlightthickness=1)
         shell.pack(fill="both", expand=True, pady=(13, 10))
         tab = tk.Frame(shell, bg="#1e2024")
         tab.pack(fill="x")
-        tk.Label(tab, text="script.lua", bg="#1e2024", fg="#dedfe3",
-                 font=("Segoe UI Semibold", 10)).pack(side="left", padx=13, pady=7)
+        self.tabs = tk.Frame(tab, bg="#1e2024")
+        self.tabs.pack(side="left")
+        Button(tab, "+", self.new_script).pack(side="left", padx=3)
         tk.Label(tab, text="Local runner", bg="#1e2024", fg="#aeb4c0").pack(side="right", padx=12)
         gutter = tk.Canvas(shell, bg="#18191c", width=42, highlightthickness=0)
         gutter.pack(side="left", fill="y")
@@ -623,17 +624,43 @@ class VoidClient:
             if self.text.edit_modified():
                 self.text.edit_modified(False)
                 draw_lines()
+                for tag in ("keyword", "literal", "comment"):
+                    self.text.tag_remove(tag, "1.0", "end")
+                for match in re.finditer(r'--[^\n]*|"(?:[^"\\\n]|\\.)*"|\b(?:print|wait|sound_button)\b',
+                                         self.source()[:LIMIT]):
+                    token = match.group()
+                    tag = "comment" if token.startswith("--") else "literal" if token.startswith('"') else "keyword"
+                    self.text.tag_add(tag, f"1.0+{match.start()}c", f"1.0+{match.end()}c")
 
         self.text.configure(yscrollcommand=draw_lines)
         self.text.bind("<Configure>", draw_lines)
         self.text.bind("<<Modified>>", edited)
         self.text.bind("<Control-Return>", lambda _: (self.run(), "break")[1])
-        self.text.insert("1.0", 'print("Hello from VoidClient")')
+        self.text.tag_configure("keyword", foreground="#7fb4ff")
+        self.text.tag_configure("literal", foreground="#e9ac85")
+        self.text.tag_configure("comment", foreground="#84958d")
+        self.documents = [{"name": "script.lua", "path": None, "text": 'print("Hello from VoidClient")'}]
+        self.selected_document = None
+        self.select_script(0)
         footer = tk.Frame(panel, bg="#111111")
         footer.pack(fill="x")
         Button(footer, "Execute", self.run, primary=True).pack(side="left")
         Button(footer, "Link Roblox", self.attach_from_editor).pack(side="left", padx=8)
-        tk.Label(footer, text="Ctrl+Enter to execute", bg="#111111", fg="#a0a0a0").pack(side="right")
+        Button(footer, "Clear", lambda: self.text.delete("1.0", "end")).pack(side="left")
+        Button(footer, "Save", self.save_script).pack(side="right")
+        Button(footer, "Open", self.open_script).pack(side="right", padx=6)
+        console = tk.Frame(panel, bg="#191a1d", highlightthickness=1, highlightbackground="#303237")
+        console.pack(fill="x", pady=(9, 0))
+        controls = tk.Frame(console, bg="#191a1d")
+        controls.pack(fill="x")
+        tk.Label(controls, text="Output", fg="#ddd", bg="#191a1d").pack(side="left", padx=10)
+        Button(controls, "Stop", self.stop_script).pack(side="right")
+        self.sound_button = Button(controls, "Test Sound", self.play_sound)
+        self.output = tk.Text(console, bg="#101113", fg="#ddd", bd=0, padx=10,
+                              height=4, font=("Consolas", 10), state="disabled")
+        self.output.pack(fill="x")
+        self.run_timer = None
+        self.output_lines = 0
         self.attach_job = None
         Button(self.attach, "Attach Roblox", self.attach_roblox, primary=True).pack(anchor="w", padx=26, pady=20)
         self.attach_status = tk.Label(self.attach, bg="#111111", fg="#ddd", text="Detached")
@@ -731,106 +758,108 @@ class VoidClient:
     def source(self):
         return self.text.get("1.0", "end-1c")
 
-    def run(self):
-        source = self.source()
-        existing = getattr(self, "run_console", None)
-        if existing is not None and existing.winfo_exists():
-            existing.lift()
-            existing.focus_set()
+    def select_script(self, index):
+        if self.selected_document is not None:
+            self.documents[self.selected_document]["text"] = self.source()
+        self.selected_document = index
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", self.documents[index]["text"])
+        self.text.edit_reset()
+        for widget in self.tabs.winfo_children():
+            widget.destroy()
+        for tab, document in enumerate(self.documents):
+            button = Button(self.tabs, document["name"][:14], lambda tab=tab: self.select_script(tab))
+            button.state(active=tab == index)
+            button.pack(side="left", padx=2)
+        self.text.focus_set()
+
+    def new_script(self, path=None, source=""):
+        if len(self.documents) >= 4:
+            messagebox.showinfo("Workspace", "The workspace holds up to four scripts.", parent=self.root)
             return
-        console = tk.Toplevel(self.root)
-        self.run_console = console
-        console.title("voidclient · Run")
-        console.geometry(f"520x245+{self.root.winfo_x() + 80}+{self.root.winfo_y() + 90}")
-        console.overrideredirect(True)
-        console.configure(bg=BG)
-        console.transient(self.root)
-        frame = tk.Frame(console, bg=BG, highlightthickness=1, highlightbackground="#343434")
-        frame.pack(fill="both", expand=True)
-        header = tk.Frame(frame, bg=BG, height=44)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        title = tk.Label(header, text="voidclient  /  Output", bg=BG, fg="white",
-                         font=("Segoe UI", 10, "bold"))
-        title.pack(side="left", padx=18)
-        tk.Frame(frame, bg="#343434", height=1).pack(fill="x")
-        footer = tk.Frame(frame, bg=BG)
-        footer.pack(side="bottom", fill="x", padx=5, pady=5)
-        output = tk.Text(frame, bg=BG, fg="#ddd", bd=0, padx=17, pady=12,
-                         font=("Consolas", 10), state="disabled", wrap="word")
-        timer = None
-        console_lines = 0
+        self.documents.append({"name": path.name if path else f"script{len(self.documents)+1}.lua",
+                               "path": path, "text": source})
+        self.select_script(len(self.documents)-1)
 
-        def write(line):
-            nonlocal console_lines
-            console_lines += 1
-            if console_lines > 251:
-                return
-            if console_lines == 251:
-                line = "[Output limit reached]"
-            output.configure(state="normal")
-            output.insert("end", line + "\n")
-            output.see("end")
-            output.configure(state="disabled")
-
-        def close(_event=None):
-            if timer is not None:
-                console.after_cancel(timer)
-            console.destroy()
-
-        Button(header, "×", close).pack(side="right", padx=(0, 3))
-
-        def begin_drag(event):
-            console.drag_offset = (event.x_root - console.winfo_x(), event.y_root - console.winfo_y())
-
-        def drag(event):
-            x, y = console.drag_offset
-            console.geometry(f"+{event.x_root - x}+{event.y_root - y}")
-
-        for target in (header, title):
-            target.bind("<ButtonPress-1>", begin_drag)
-            target.bind("<B1-Motion>", drag)
-
-        console.protocol("WM_DELETE_WINDOW", close)
-        console.bind("<Alt-F4>", close)
-        console.bind("<Escape>", close)
-        console.update_idletasks()
-        console.focus_set()
-
-        def play_sound():
+    def open_script(self):
+        name = filedialog.askopenfilename(parent=self.root, filetypes=[("Script files", "*.lua *.txt"), ("All files", "*")])
+        if name:
             try:
-                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-            except RuntimeError as error:
-                write(f"Sound unavailable: {error}")
+                path = Path(name)
+                with path.open("rb") as file:
+                    data = file.read(LIMIT + 1)
+                if len(data) > LIMIT:
+                    raise ValueError("Scripts must be 16 KB or smaller.")
+                self.new_script(path, data.decode("utf-8-sig"))
+            except (OSError, ValueError) as error:
+                messagebox.showerror("Open Script", str(error), parent=self.root)
 
-        sound_button = Button(footer, "Test Sound", play_sound)
-        output.pack(fill="both", expand=True)
+    def save_script(self):
+        document = self.documents[self.selected_document]
+        name = document["path"] or filedialog.asksaveasfilename(
+            parent=self.root, initialfile=document["name"], defaultextension=".lua")
+        if name:
+            try:
+                path = Path(name)
+                path.write_text(self.source(), encoding="utf-8")
+                document.update(path=path, name=path.name)
+                self.select_script(self.selected_document)
+            except OSError as error:
+                messagebox.showerror("Save Script", str(error), parent=self.root)
+
+    def write_output(self, line):
+        self.output_lines += 1
+        if self.output_lines > 251:
+            return
+        if self.output_lines == 251:
+            line = "[Output limit reached]"
+        self.output.configure(state="normal")
+        self.output.insert("end", line + "\n")
+        self.output.see("end")
+        self.output.configure(state="disabled")
+
+    def stop_script(self):
+        if self.run_timer is not None:
+            self.root.after_cancel(self.run_timer)
+            self.run_timer = None
+            self.write_output("[Stopped]")
+
+    def play_sound(self):
+        try:
+            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except RuntimeError as error:
+            self.write_output(str(error))
+
+    def run(self):
+        self.stop_script()
+        self.sound_button.pack_forget()
+        self.output_lines = 0
+        self.output.configure(state="normal")
+        self.output.delete("1.0", "end")
+        self.output.configure(state="disabled")
+        try:
+            steps = iter(parse(self.source()))
+        except ValueError as error:
+            self.write_output(str(error))
+            return
 
         def advance():
-            nonlocal timer
-            timer = None
+            self.run_timer = None
             for _ in range(32):
                 try:
                     step = next(steps)
                 except StopIteration:
-                    write("[Finished]")
+                    self.write_output("[Finished]")
                     return
                 if step is None:
-                    sound_button.pack(side="left")
-                    continue
-                if isinstance(step, int):
-                    if step:
-                        timer = console.after(step, advance)
-                        return
-                    continue
-                write(step)
-            timer = console.after(10, advance)
+                    self.sound_button.pack(side="right")
+                elif isinstance(step, str):
+                    self.write_output(step)
+                elif step:
+                    self.run_timer = self.root.after(step, advance)
+                    return
+            self.run_timer = self.root.after(10, advance)
 
-        try:
-            steps = iter(parse(source))
-        except ValueError as error:
-            write(str(error))
-            return
         advance()
 
 
